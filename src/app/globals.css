@@ -1,8 +1,18 @@
+/* 
+  Define CSS layer order to ensure proper specificity:
+  1. theme: Tailwind v4 theme variables
+  2. base: CSS resets
+  3. mui: Material UI styles injected via Emotion enableCssLayer
+  4. components: Custom components
+  5. utilities: Tailwind utility classes (which take precedence when applied)
+*/
+@layer theme, base, mui, components, utilities;
+
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f8fafc;
+  --foreground: #0f172a;
 }
 
 @theme inline {
@@ -12,15 +22,8 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
-  background: var(--background);
+  background-color: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  min-height: 100vh;
 }
