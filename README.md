@@ -1,100 +1,60 @@
 # Smart Conversational Agent for Financial Document Processing
 
-Final Year Project (FYP) — **Phase 1: Foundational Project Architecture & Configuration**
+Intelligent, conversational retrieval-augmented generation (RAG) system tailored specifically for financial document ingestion, structured entity extraction, compliance auditing, and natural language question answering.
+
+- **Frontend Stack**: React + Vite (JavaScript / JSX), React Router, Material UI, Tailwind CSS v4, Vercel AI SDK.
+- **Backend Stack**: Node.js & Express (ESM JavaScript), Google Gemini API (Streaming & Embeddings), Supabase Vector Database (`pgvector`), PDF text extraction pipeline.
 
 ---
 
-## 📌 Project Overview
-This project develops an intelligent, conversational retrieval-augmented generation (RAG) system tailored specifically for financial document ingestion, structured entity extraction, compliance auditing, and natural language question answering.
-
-- **Primary Domain**: Financial Filings (SEC 10-K, 10-Q), Invoices, Balance Sheets, Cash Flow & Income Statements.
-- **Frontend Stack**: Next.js (App Router), TypeScript, Material UI (MUI v6/v7), and Tailwind CSS v4.
-- **Backend Stack**: Next.js App Router API Routes, ready for LLM (OpenAI / Gemini), Vector Search (Pinecone / Chroma), and OCR/Document Intelligence pipelines.
-
----
-
-## 🏗️ Architecture & Folder Structure
+## 🏗️ Architecture & Project Structure
 
 ```
-FYP/
-├── .env.example                       # Environment configuration template
-├── eslint.config.mjs                  # ESLint configuration
-├── next.config.ts                     # Next.js configuration
-├── package.json                       # Project dependencies and scripts
-├── tsconfig.json                      # TypeScript configuration with @/* path alias
-├── public/                            # Static assets
-└── src/
-    ├── app/                           # Next.js App Router root
-    │   ├── api/                       # Backend API routes
-    │   │   ├── chat/
-    │   │   │   └── route.ts           # Chat & RAG conversational query endpoints
-    │   │   ├── documents/
-    │   │   │   ├── route.ts           # Document listing & upload endpoints
-    │   │   │   └── [id]/
-    │   │   │       ├── route.ts       # Document details & deletion
-    │   │   │       └── process/
-    │   │   │           └── route.ts   # OCR & vector indexing trigger
-    │   │   ├── dashboard/
-    │   │   │   └── analytics/
-    │   │   │       └── route.ts       # Administrative KPIs & audit log feed
-    │   │   └── health/
-    │   │       └── route.ts           # Service health & readiness check
-    │   ├── chat/
-    │   │   └── page.tsx               # Chat Interface page entry
-    │   ├── dashboard/
-    │   │   └── page.tsx               # Admin Dashboard page entry
-    │   ├── globals.css                # Tailwind CSS v4 & CSS cascade layer order
-    │   ├── layout.tsx                 # Root layout with ThemeRegistry integration
-    │   └── page.tsx                   # Project landing & navigation portal
-    │
-    ├── components/                    # Modular frontend components
-    │   ├── chat/                      # Reusable components for Chat Interface
-    │   │   └── index.ts               # Interface contracts (ChatMessage, ChatInput, Citations)
-    │   ├── dashboard/                 # Reusable components for Admin Dashboard
-    │   │   └── index.ts               # Interface contracts (MetricCard, DocumentTable, Status)
-    │   ├── common/                    # Shared UI primitives
-    │   │   └── index.ts               # Interface contracts (PageHeader, LoadingSpinner, EmptyState)
-    │   ├── layout/                    # Layout navigation wrappers
-    │   │   └── index.ts               # Interface contracts (Navbar, Sidebar, Footer)
-    │   └── providers/                 # Client providers
-    │       ├── ThemeRegistry.tsx      # MUI AppRouterCacheProvider & ThemeProvider
-    │       └── index.ts
-    │
-    ├── theme/                         # Material UI Theme configuration
-    │   ├── theme.ts                   # Financial color palette, typography & overrides
-    │   └── index.ts
-    │
-    ├── types/                         # TypeScript domain models & interfaces
-    │   ├── api.ts                     # Standard ApiResponse and PaginatedResponse
-    │   ├── chat.ts                    # ChatMessage, Citation, and Conversation
-    │   ├── document.ts                # FinancialDocument, Category, and Entity models
-    │   ├── dashboard.ts               # DashboardMetricOverview and AuditLogEntry
-    │   └── index.ts
-    │
-    ├── lib/                           # Utilities & constants
-    │   ├── constants.ts               # Categories, allowed MIME types, project config
-    │   ├── utils.ts                   # Currency, file size, and date formatters
-    │   └── index.ts
-    │
-    ├── services/                      # API service contracts & client implementations
-    │   ├── documentService.ts         # Document CRUD & processing pipeline client
-    │   ├── agentService.ts            # Conversational agent query client
-    │   └── index.ts
-    │
-    └── hooks/                         # Reusable React hooks
-        ├── useChat.ts                 # Chat operation & state management hook
-        ├── useDocuments.ts            # Document listing & upload hook
-        └── index.ts
+Smart-Finance-Agent-for-document-processing/
+├── frontend/                               # React + Vite Client Application (JavaScript)
+│   ├── index.html                          # HTML shell & font definitions
+│   ├── vite.config.js                      # Vite config with backend API proxy & Tailwind v4
+│   ├── package.json                        # Frontend dependencies & scripts
+│   ├── public/                             # Static assets & favicon
+│   └── src/
+│       ├── main.jsx                        # React root entry point
+│       ├── App.jsx                         # App routes (/ , /chat, /dashboard, /login)
+│       ├── index.css                       # Tailwind v4 cascade layer configuration
+│       ├── pages/                          # Application pages
+│       │   ├── Home.jsx                    # System landing page
+│       │   ├── Chat.jsx                    # Conversational RAG assistant with GenUI
+│       │   ├── Dashboard.jsx               # Financial admin operations & audit dashboard
+│       │   └── Login.jsx                   # Role-Based Authentication (Admin vs Staff)
+│       ├── components/
+│       │   ├── chat/                       # Chat UI, Bar Chart & Data Table GenUI widgets
+│       │   ├── layout/                     # AppShell navigation wrapper
+│       │   └── providers/                  # Material UI Theme provider
+│       ├── context/
+│       │   └── AuthContext.jsx             # Supabase & offline RBAC auth context
+│       ├── hooks/                          # Reusable React hooks (useChat, useDocuments)
+│       ├── services/                       # API clients (documentService, agentService)
+│       ├── theme/                          # Financial theme styling & typography
+│       └── lib/                            # Shared utilities and Supabase client
+│
+├── backend/                                # Node.js / Express Server (JavaScript ESM)
+│   ├── package.json                        # Backend dependencies & scripts
+│   ├── .env.example                        # Backend environment variable template
+│   └── src/
+│       ├── server.js                       # Express app with CORS & error handling
+│       ├── routes/
+│       │   ├── health.js                   # Health check endpoint (/api/health)
+│       │   ├── dashboard.js                # Dashboard analytics endpoint (/api/dashboard/analytics)
+│       │   ├── documents.js                # Document CRUD & RAG ingestion (/api/documents)
+│       │   └── chat.js                     # Conversational Gemini streaming & tool invocation (/api/chat)
+│       └── lib/
+│           ├── supabase.js                 # Server-side Supabase client
+│           └── rag/                        # RAG ingestion, PDF parser & vector retrieval
+│               ├── ingestion.js            # PDF text extraction, chunking & embeddings
+│               ├── retrieval.js            # Semantic vector similarity search
+│               └── index.js
+│
+└── package.json                            # Root scripts to run both frontend and backend
 ```
-
----
-
-## 🎨 Styling: Material UI & Tailwind CSS Interoperability
-
-To ensure Material UI and Tailwind CSS work in harmony without specificity collisions:
-1. **CSS Cascade Layers**: `globals.css` declares `@layer theme, base, mui, components, utilities;`.
-2. **MUI AppRouterCacheProvider**: Uses `options={{ enableCssLayer: true, key: 'mui' }}`. This wraps all Emotion-generated Material UI classes inside `@layer mui`, allowing Tailwind utilities to override or complement MUI styles without `!important` hacks.
-3. **MUI Theme Palette**: Tailored for financial trust with deep Slate (`#0F172A`), financial Blue (`#2563EB`), Emerald gain indicators (`#059669`), and clean typography.
 
 ---
 
@@ -102,20 +62,59 @@ To ensure Material UI and Tailwind CSS work in harmony without specificity colli
 
 ### 1. Install Dependencies
 ```bash
+# Install backend dependencies
+cd backend
+npm install
+
+# Install frontend dependencies
+cd ../frontend
 npm install
 ```
 
-### 2. Configure Environment
-```bash
-copy .env.example .env.local
+### 2. Configure Environment Variables
+
+**Backend (`backend/.env` or `backend/.env.local`):**
+```env
+PORT=5000
+FRONTEND_URL=http://localhost:5173
+
+# Google Gemini API Key
+GOOGLE_GEMINI_API_KEY=your-gemini-api-key-here
+GEMINI_MODEL=gemini-2.5-flash
+
+# Supabase Credentials
+SUPABASE_URL=https://nedjnudzmphfxolcnxcm.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
+SUPABASE_ANON_KEY=sb_publishable_5W1jLi5I0-uz1Cwv5_I1-g_EnYd6zKf
 ```
 
-### 3. Run Development Server
+**Frontend (`frontend/.env` or `frontend/.env.local`):**
+```env
+VITE_SUPABASE_URL=https://nedjnudzmphfxolcnxcm.supabase.co
+VITE_SUPABASE_ANON_KEY=sb_publishable_5W1jLi5I0-uz1Cwv5_I1-g_EnYd6zKf
+```
+
+---
+
+### 3. Run Development Servers
+
+**Run Backend (Express on port 5000 with auto-reload):**
+```bash
+npm run dev:backend
+```
+
+**Run Frontend (React + Vite on port 5173):**
+```bash
+npm run dev:frontend
+```
+
+**Or Run Both Concurrently from Root:**
 ```bash
 npm run dev
 ```
 
-Visit [http://localhost:3000](http://localhost:3000) to view the portal.
-- **Chat Interface**: [http://localhost:3000/chat](http://localhost:3000/chat)
-- **Admin Dashboard**: [http://localhost:3000/dashboard](http://localhost:3000/dashboard)
-- **Health Check API**: [http://localhost:3000/api/health](http://localhost:3000/api/health)
+Visit [http://localhost:5173](http://localhost:5173) in your browser:
+- **Chat Assistant**: [http://localhost:5173/chat](http://localhost:5173/chat)
+- **Operations Dashboard**: [http://localhost:5173/dashboard](http://localhost:5173/dashboard)
+- **Authentication**: [http://localhost:5173/login](http://localhost:5173/login)
+- **Backend API Health Check**: [http://localhost:5000/api/health](http://localhost:5000/api/health)

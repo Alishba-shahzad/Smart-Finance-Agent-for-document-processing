@@ -1,41 +1,14 @@
 {
   "name": "financial-doc-agent",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
+  "description": "Smart Conversational Agent for Financial Document Processing (React+Vite Frontend & Node.js/Express Backend)",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
-  },
-  "dependencies": {
-    "@ai-sdk/google": "^4.0.105",
-    "@ai-sdk/react": "^4.0.157",
-    "@emotion/react": "^11.14.0",
-    "@emotion/styled": "^11.14.1",
-    "@mui/icons-material": "^9.5.0",
-    "@mui/material": "^9.5.0",
-    "@mui/material-nextjs": "^9.5.0",
-    "@supabase/ssr": "^0.12.7",
-    "@supabase/supabase-js": "^2.118.0",
-    "@types/pdf-parse": "^1.1.5",
-    "ai": "^7.0.153",
-    "lucide-react": "^1.62.0",
-    "next": "16.4.3",
-    "pdf-parse": "^1.1.1",
-    "react": "19.3.0",
-    "react-dom": "19.3.0",
-    "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
-  },
-  "devDependencies": {
-    "@tailwindcss/turbopack": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.4.3",
-    "tailwindcss": "^4",
-    "typescript": "^5"
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev": "node -e \"const { spawn } = require('child_process'); spawn('npm', ['run', 'dev'], { cwd: 'backend', stdio: 'inherit', shell: true }); spawn('npm', ['run', 'dev'], { cwd: 'frontend', stdio: 'inherit', shell: true });\"",
+    "build:frontend": "cd frontend && npm run build",
+    "build": "npm run build:frontend",
+    "start": "cd backend && npm start"
   }
 }
