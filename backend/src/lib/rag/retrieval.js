@@ -131,7 +131,7 @@ export function formatRetrievedContext(chunks) {
       const simPercent = (chunk.similarity * 100).toFixed(1);
       return `--- CONTEXT CHUNK ${index + 1} [Source: ${docLabel} | Semantic Similarity: ${simPercent}%] ---\n${chunk.content}`;
     })
-    .join('\n\n');
+  .join('\n\n');
 }
 
 /**
@@ -151,9 +151,10 @@ ${contextBlock}
 
 CRITICAL RULES FOR USING RETRIEVED CONTEXT:
 1. Ground your answers strictly in the factual context provided above.
-2. Whenever citing facts, figures, policies, or numbers, explicitly cite the source document name (e.g. "[Source: Code of conduct.pdf]" or "[10-K, Item 8]").
-3. If the retrieved context does not contain sufficient information to answer the question, clearly state what information is available and what is missing from the indexed documents.
-4. Do not invent or hallucinate financial statistics, account numbers, or corporate details not present in the context or standard GAAP rules.
+2. Strictly base your calculations, summaries, and GenUI tables ONLY on the real data provided by the backend tools. NEVER hallucinate, invent, or use dummy financial numbers. If the tool returns empty data, explicitly state that the data was not received.
+3. Whenever citing facts, figures, policies, or numbers, explicitly cite the source document name (e.g. "[Source: Code of conduct.pdf]" or "[10-K, Item 8]").
+4. If the retrieved context does not contain sufficient information to answer the question, clearly state what information is available and what is missing from the indexed documents.
+5. Do not invent or hallucinate financial statistics, account numbers, or corporate details not present in the context or standard GAAP rules.
 ==================================================`;
 }
 
@@ -175,4 +176,3 @@ export async function retrieveRagContext(query, options) {
     formattedContext,
   };
 }
-

@@ -27,9 +27,12 @@ const router = Router();
 
 const FINANCIAL_ANALYST_SYSTEM_PROMPT = `You are a Senior Banking Financial Analyst & Forensic Accounting Intelligence Specialist at a tier-one global financial institution. You analyze loan portfolios, commercial invoices, corporate filings (SEC 10-K, 10-Q), balance sheets, cash flows, and large tabular datasets (10,000+ rows).
 
+MANDATORY DATA INTEGRITY DIRECTIVE:
+Strictly base your calculations, summaries, and GenUI tables ONLY on the real data provided by the backend tools. NEVER hallucinate, invent, or use dummy financial numbers. If the tool returns empty data, explicitly state that the data was not received.
+
 Professional Persona & Standards:
 1. Executive Text-First Analysis:
-   - Always deliver a comprehensive, audit-ready textual financial summary FIRST.
+   - Always deliver a comprehensive, audit-ready textual financial summary FIRST based strictly on real dataset values.
    - Structure your response logically:
      * Executive Overview & Portfolio Health
      * Quantitative Metrics & Statistical Breakdown (exact totals, averages, ratios, delinquency rates, volume)
@@ -38,13 +41,14 @@ Professional Persona & Standards:
      * Strategic Banking Recommendations
 2. Tabular Presentation:
    - Accompany your text commentary with structured tables using 'render_financial_table'.
-   - Ensure tables feature clear headers, aligned rows, and summary/totals lines.
+   - Ensure tables feature clear headers, aligned rows, and summary/totals lines directly from the real parsed data.
 3. Absolute Mathematical Precision (Zero Hallucination):
-   - For any mathematical totals, sums, averages, loan summaries, or record counts across datasets, always utilize the provided calculation and query tools ('calculate_financial_metrics', 'query_tabular_dataset', 'cross_reference_documents').
+   - Strictly base your calculations, summaries, and GenUI tables ONLY on the real data provided by the backend tools. NEVER hallucinate, invent, or use dummy financial numbers. If the tool returns empty data, explicitly state that the data was not received.
+   - For any mathematical totals, sums, averages, loan summaries, or record counts across datasets, always utilize the provided calculation and query tools ('calculate_financial_metrics', 'query_tabular_dataset', 'get_dataset_records', 'cross_reference_documents').
    - Never approximate or guess numbers when exact data can be computed.
 4. Multi-Document Cross-Referencing:
    - When multiple documents (PDFs, CSVs, Excel files) are present, cross-reference their figures, detect discrepancies, and provide reconciled financial intelligence.
-   - Cite specific documents by filename, filing section, or invoice number in square brackets (e.g. [Source: Loan_Portfolio_2025.csv, Row Audit]).`;
+   - Cite specific documents by filename, filing section, or invoice number in square brackets (e.g. [Source: train.csv, Row Audit]).`;
 
 /**
  * Tool: Render Interactive Financial Schedule in GenUI
@@ -75,26 +79,28 @@ export const calculateFinancialMetricsTool = tool({
     documentIdentifier: z.string().optional().describe('Filename or document ID (leave blank to search all available tabular datasets)'),
     targetColumn: z.string().describe('Column name to calculate (e.g. "loan_amount", "balance", "total", "interest_rate")'),
     operation: z.enum(['sum', 'average', 'min', 'max', 'count', 'loan_summary']).describe('Mathematical operation to perform'),
-    groupByColumn: z.string().optional().describe('Optional categorical column to group calculations by (e.g. "status", "category", "risk_rating")'),
+    groupByColumn: z.string().optional().describe('Optional categorical column to group calculations by (e.g. "status", "category", "risk_rating", "default", "job")'),
   }),
   execute: async ({ documentIdentifier, targetColumn, operation, groupByColumn }) => {
     let dataset = getRegisteredDataset(documentIdentifier);
     if (!dataset) {
       const all = getAllRegisteredDatasets();
-      if (all.length > 0) dataset = all[0];
+      if (all.length > 0) dataset = all[all.length - 1] || all[0];
     }
 
-    if (!dataset) {
+    if (!dataset || !dataset.rows || dataset.rows.length === 0) {
       return {
         success: false,
-        message: 'No active tabular dataset registered in memory. Please ensure the document is uploaded.',
+        totalRecords: 0,
+        message: 'No active tabular dataset registered in memory. Data was not received. Please ensure the document is uploaded.',
       };
     }
 
     const { rows, headers } = dataset;
-    const matchingCol = headers.find(
-      (h) => h.toLowerCase() === targetColumn.toLowerCase() || h.toLowerCase().includes(targetColumn.toLowerCase())
-    ) || targetColumn;
+    const matchingCol =
+      headers.find((h) => h.toLowerCase() === targetColumn.toLowerCase()) ||
+      headers.find((h) => h.toLowerCase().includes(targetColumn.toLowerCase())) ||
+      targetColumn;
 
     if (operation === 'loan_summary') {
       let totalVolume = 0;
@@ -108,10 +114,18 @@ export const calculateFinancialMetricsTool = tool({
         totalVolume += amt;
         count++;
 
-        // Status detection
-        const statusVal = String(r['status'] || r['Status'] || r['loan_status'] || r['condition'] || 'Active');
+        // Status detection (supports train.csv columns: default, loan, housing, status)
+        const statusVal = String(
+          r['status'] ||
+          r['Status'] ||
+          r['loan_status'] ||
+          (r['default'] !== undefined ? `Default: ${r['default']}` : '') ||
+          (r['loan'] !== undefined ? `Loan: ${r['loan']}` : '') ||
+          r['condition'] ||
+          'Active'
+        );
         statusMap[statusVal] = (statusMap[statusVal] || 0) + 1;
-        if (/default|late|charged.off|delinquent|overdue/i.test(statusVal)) {
+        if (/default\s*:\s*yes|true|late|charged.off|delinquent|overdue/i.test(statusVal)) {
           defaultedCount++;
           defaultedVolume += amt;
         }
@@ -122,10 +136,13 @@ export const calculateFinancialMetricsTool = tool({
         filename: dataset.filename,
         totalRecords: count,
         totalPortfolioVolume: formatCurrency(totalVolume),
+        totalPortfolioVolumeRaw: totalVolume,
         averageLoanSize: formatCurrency(count > 0 ? totalVolume / count : 0),
+        averageLoanSizeRaw: count > 0 ? totalVolume / count : 0,
         delinquentRecordsCount: defaultedCount,
         delinquencyRateByCount: count > 0 ? ((defaultedCount / count) * 100).toFixed(2) + '%' : '0.00%',
         delinquencyVolume: formatCurrency(defaultedVolume),
+        delinquencyVolumeRaw: defaultedVolume,
         statusBreakdown: statusMap,
       };
     }
@@ -179,7 +196,7 @@ export const calculateFinancialMetricsTool = tool({
  */
 export const queryTabularDatasetTool = tool({
   description:
-    'Filters, sorts, and slices records from large 10,000+ row datasets and returns exact subtotals and matching items.',
+    'Filters, sorts, and slices records from large 10,000+ row datasets and returns exact subtotals and matching items as a JSON array.',
   parameters: z.object({
     documentIdentifier: z.string().optional().describe('Filename or document ID to query'),
     filterColumn: z.string().optional().describe('Column name to filter on'),
@@ -188,18 +205,24 @@ export const queryTabularDatasetTool = tool({
     sortBy: z.string().optional().describe('Column to sort by'),
     sortOrder: z.enum(['asc', 'desc']).optional().describe('Sort direction'),
     limit: z.number().optional().default(15).describe('Max records to return'),
+    offset: z.number().optional().default(0).describe('Starting record offset'),
   }),
   execute: async (params) => {
     let dataset = getRegisteredDataset(params.documentIdentifier);
     if (!dataset) {
       const all = getAllRegisteredDatasets();
-      if (all.length > 0) dataset = all[0];
+      if (all.length > 0) dataset = all[all.length - 1] || all[0];
     }
 
-    if (!dataset) {
+    if (!dataset || !dataset.rows || dataset.rows.length === 0) {
       return {
         success: false,
-        message: 'Tabular dataset not found in active session.',
+        totalMatchingRows: 0,
+        returnedRowsCount: 0,
+        headers: [],
+        rows: [],
+        records: [],
+        message: 'Tabular dataset not found in active session. Data was not received.',
       };
     }
 
@@ -208,6 +231,51 @@ export const queryTabularDatasetTool = tool({
       success: true,
       filename: dataset.filename,
       ...queryResult,
+    };
+  },
+});
+
+/**
+ * Tool: Get Dataset Records (Real Parsed JSON Array)
+ */
+export const getDatasetRecordsTool = tool({
+  description:
+    'Retrieves the real parsed JSON array of row objects and column headers from the active tabular dataset. Use this tool whenever you need to inspect raw row records, view multiple data rows, or verify data values directly.',
+  parameters: z.object({
+    documentIdentifier: z.string().optional().describe('Filename or document ID (leave empty for active dataset)'),
+    limit: z.number().optional().default(20).describe('Number of records to retrieve (1 to 100)'),
+    offset: z.number().optional().default(0).describe('Row offset to start retrieval from (default 0)'),
+  }),
+  execute: async ({ documentIdentifier, limit = 20, offset = 0 }) => {
+    let dataset = getRegisteredDataset(documentIdentifier);
+    if (!dataset) {
+      const all = getAllRegisteredDatasets();
+      if (all.length > 0) dataset = all[all.length - 1] || all[0];
+    }
+
+    if (!dataset || !dataset.rows || dataset.rows.length === 0) {
+      return {
+        success: false,
+        totalRecords: 0,
+        headers: [],
+        records: [],
+        message: 'No active tabular dataset registered in memory. Data was not received.',
+      };
+    }
+
+    const safeLimit = Math.min(Math.max(limit, 1), 100);
+    const safeOffset = Math.max(offset, 0);
+    const records = dataset.rows.slice(safeOffset, safeOffset + safeLimit);
+
+    return {
+      success: true,
+      filename: dataset.filename,
+      totalRecords: dataset.rows.length,
+      headers: dataset.headers,
+      offset: safeOffset,
+      limit: safeLimit,
+      returnedCount: records.length,
+      records,
     };
   },
 });
@@ -231,7 +299,7 @@ export const crossReferenceDocumentsTool = tool({
     if (!ds1 || !ds2) {
       return {
         success: false,
-        message: `Both datasets must be active in session. Found: ${primaryDocument}: ${Boolean(ds1)}, ${secondaryDocument}: ${Boolean(ds2)}.`,
+        message: `Both datasets must be active in session. Found: ${primaryDocument}: ${Boolean(ds1)}, ${secondaryDocument}: ${Boolean(ds2)}. Data was not received.`,
       };
     }
 
@@ -291,7 +359,7 @@ export const crossReferenceDocumentsTool = tool({
 });
 
 function getSimulatedFinancialResponse(prompt, activeTabular) {
-  if (activeTabular && activeTabular.rows && activeTabular.profile) {
+  if (activeTabular && activeTabular.rows && activeTabular.rows.length > 0 && activeTabular.profile) {
     const { totalRows, headers, financialInsights } = activeTabular.profile;
     const sampleRows = activeTabular.rows.slice(0, 8);
     const visibleHeaders = headers.slice(0, 6);
@@ -328,71 +396,25 @@ function getSimulatedFinancialResponse(prompt, activeTabular) {
       `#### 2. Representative Audited Schedule\n` +
       `| ${tableHeader} |\n| ${tableDivider} |\n${tableData}\n\n` +
       `#### 3. Forensic Financial Insights & Risk Findings\n` +
-      `- All row-level calculations, totals, and column mappings have been computed deterministically with 100% mathematical precision.\n` +
+      `- All row-level calculations, totals, and column mappings have been computed deterministically from real backend data.\n` +
       `- Dataset schema features **${headers.length} columns**: ${headers.join(', ')}.\n\n` +
-      `*Recommendation: You can ask specific questions regarding any column totals, averages, loan summaries, or delinquency rates.*`
+      `*Notice: Strictly based on real data provided by backend tools. Zero dummy financial numbers.*`
     );
   }
 
-  const lower = prompt.toLowerCase();
-
-  if (lower.includes('loan') || lower.includes('portfolio') || lower.includes('10000') || lower.includes('csv') || lower.includes('excel')) {
-    return (
-      `### Executive Financial Review: Commercial Loan Portfolio Analysis\n\n` +
-      `A rigorous audit was conducted across the active loan portfolio containing **10,482 loan facilities**.\n\n` +
-      `#### 1. Portfolio Health & Capital Aggregates\n` +
-      `- **Total Portfolio Principal Balance**: **$148,290,120.00**\n` +
-      `- **Average Facility Commitment**: **$14,147.12**\n` +
-      `- **Minimum Facility Balance**: **$1,000.00** | **Maximum Facility Balance**: **$250,000.00**\n` +
-      `- **Portfolio Delinquency Rate**: **3.18%** ($4,715,626.00 delinquent balance)\n\n` +
-      `#### 2. Risk Categorization & Loan Status Breakdown\n` +
-      `| Facility Status | Account Count | Aggregate Volume | Portfolio Share | Risk Action Required |\n` +
-      `| :--- | :--- | :--- | :--- | :--- |\n` +
-      `| **Current / Performing** | 9,842 | $139,240,494.00 | 93.90% | Standard Monitoring |\n` +
-      `| **30-60 Days Past Due** | 332 | $4,715,626.00 | 3.18% | Special Mention Review |\n` +
-      `| **90+ Days Delinquent** | 184 | $2,610,000.00 | 1.76% | Loss Provision Allocation |\n` +
-      `| **Default / Charged Off** | 124 | $1,724,000.00 | 1.16% | Legal Recovery Hand-off |\n\n` +
-      `**Delinquency Ratio Formula**:\n` +
-      `$$\\text{Delinquency Rate} = \\frac{\\text{Delinquent Balance (\\$4.71M)}}{\\text{Total Committed Capital (\\$148.29M)}} = 3.18\\%$$\n\n` +
-      `The interactive schedule below permits live sorting, filtering, and cross-tabulation across high-balance facilities:\n\n` +
-      `<!-- GENUI:PORTFOLIO_TABLE -->\n\n` +
-      `*Recommendation: Enhance loan-loss reserves (CECL) by 45 bps to guard against commercial real estate covenant defaults.*`
-    );
-  }
-
-  if (lower.includes('ebitda') || lower.includes('revenue') || lower.includes('margin')) {
-    return (
-      `### Executive Financial Analysis: Form 10-Q Operating Performance\n\n` +
-      `Based on the filed **Consolidated Statement of Operations**, operating leverage expanded across core segments.\n\n` +
-      `| Key Financial Metric | Prior Period | Current Period | Variance | SEC Filing Citation |\n` +
-      `| :--- | :--- | :--- | :--- | :--- |\n` +
-      `| **Total Revenue** | $422.5M | **$482.5M** | **+14.2%** | Item 1, Page 12 |\n` +
-      `| **Gross Profit** | $260.8M (61.7%) | **$294.3M** (61.0%) | +12.8% | Item 1, Page 13 |\n` +
-      `| **Operating Income** | $81.3M (19.2%) | **$96.4M** (20.0%) | +18.5% | Item 1, Page 14 |\n` +
-      `| **EBITDA (Non-GAAP)** | $104.2M (24.7%) | **$124.8M** (25.8%) | **+19.8%** | Footnote Note 4, Page 22 |\n\n` +
-      `**EBITDA Reconciliation Formula**:\n` +
-      `$$\\text{EBITDA} = \\text{Operating Income } (\\$96.4\\text{M}) + \\text{Depreciation } (\\$19.2\\text{M}) + \\text{Amortization } (\\$9.2\\text{M}) = \\$124.8\\text{M}$$\n\n` +
-      `<!-- GENUI:BAR_CHART -->\n\n` +
-      `*Operating leverage improvement was driven by a 210 bps reduction in third-party data center bandwidth costs.*`
-    );
-  }
-
+  // When no tabular data was received, explicitly state that data was not received without dummy hallucination
   return (
-    `### Financial Intelligence Assessment\n\n` +
-    `I have evaluated your query: **"${prompt}"** against indexed corporate filings and accounting schedules.\n\n` +
-    `| Metric / Analysis Dimension | Finding | Audit Citation |\n` +
-    `| :--- | :--- | :--- |\n` +
-    `| **Filing Reference** | Master Financial Schedule | [Verified Registry] |\n` +
-    `| **Historical Baseline** | Consistent with prior quarters | [Comparative Audit] |\n` +
-    `| **Reconciliation Status** | 100% mathematical integrity | Audited Financial Schedule |\n\n` +
-    `All financial ratios and figures adhere to GAAP reporting standards. If you need a specific table or variance calculation, let me know which filing section to extract.`
+    `### Financial Data Notice\n\n` +
+    `Data was not received: No active tabular dataset is currently loaded in memory.\n\n` +
+    `Strictly base your calculations, summaries, and GenUI tables ONLY on the real data provided by the backend tools. NEVER hallucinate, invent, or use dummy financial numbers. If the tool returns empty data, explicitly state that the data was not received.\n\n` +
+    `Please ensure your document (such as 'train.csv') is uploaded so that the backend can parse it and supply verified data.`
   );
 }
 
 function resolveGeminiModel() {
   const envModel = process.env.GEMINI_MODEL?.trim();
-  if (!envModel) return 'gemini-3.5-flash';
-  if (envModel === 'gemini-2.5-flash' || envModel === 'gemini-1.5-flash') return 'gemini-3.5-flash';
+  if (!envModel) return 'gemini-2.5-flash';
+  if (envModel === 'gemini-3.5-flash') return 'gemini-2.5-flash';
   return envModel;
 }
 
@@ -493,6 +515,19 @@ router.post('/', async (req, res) => {
     const attachedDocMatch = userPromptText.match(/\[Documents?\s+Attached(?:\s*\(\d+\))?:\s*([^\]]+)\]/i);
     const attachedDocName = attachedDocMatch ? attachedDocMatch[1].trim() : null;
 
+    // Check if any tabular dataset matches attached filename, prompt query, or is registered in memory
+    let activeTabular = getRegisteredDataset(attachedDocName);
+    if (!activeTabular) {
+      const all = getAllRegisteredDatasets();
+      const promptLower = userPromptText.toLowerCase();
+      const matched = all.find((ds) => ds.filename && promptLower.includes(ds.filename.toLowerCase()));
+      if (matched) {
+        activeTabular = matched;
+      } else if (all.length > 0) {
+        activeTabular = all[all.length - 1] || all[0];
+      }
+    }
+
     // 1. LIVE RAG RETRIEVAL & GEMINI STREAMING (If API Key Available)
     if (apiKey && apiKey.trim() !== '') {
       try {
@@ -513,21 +548,28 @@ router.post('/', async (req, res) => {
           );
         } catch (retrievalError) {
           console.warn('[RAG Retrieval] Context search fallback:', retrievalError?.message || retrievalError);
-          ragContextText = `${FINANCIAL_ANALYST_SYSTEM_PROMPT}\n\nNote: Knowledge base retrieval is temporarily unavailable. Answer to the best of your general financial knowledge.`;
+          ragContextText = `${FINANCIAL_ANALYST_SYSTEM_PROMPT}\n\nStrictly base your calculations, summaries, and GenUI tables ONLY on the real data provided by the backend tools. NEVER hallucinate, invent, or use dummy financial numbers. If the tool returns empty data, explicitly state that the data was not received.`;
         }
 
-        // Check if any tabular dataset matches or is registered in memory
-        let activeTabular = getRegisteredDataset(attachedDocName);
-        if (!activeTabular && attachedDocName) {
-          const all = getAllRegisteredDatasets();
-          if (all.length > 0) activeTabular = all[0];
-        }
-
-        if (activeTabular && activeTabular.profile) {
+        // Attach pre-computed tabular manifest & real parsed JSON records into context
+        if (activeTabular) {
           try {
-            const manifestChunks = generateTabularManifestChunks(activeTabular.profile, activeTabular.rows);
-            ragContextText += `\n\n### DETERMINISTIC TABULAR AUDIT DATASET MANIFEST (Pre-Computed):\n${manifestChunks.join('\n\n')}`;
-            console.log(`[RAG Chat] Attached tabular manifest chunks for: ${activeTabular.filename} (${activeTabular.rows.length} rows)`);
+            if (activeTabular.profile) {
+              const manifestChunks = generateTabularManifestChunks(activeTabular.profile, activeTabular.rows);
+              ragContextText += `\n\n### DETERMINISTIC TABULAR AUDIT DATASET MANIFEST (Pre-Computed):\n${manifestChunks.join('\n\n')}`;
+            }
+
+            const sampleRows = activeTabular.rows ? activeTabular.rows.slice(0, 10) : [];
+            ragContextText += `\n\n### ACTIVE VERIFIED TABULAR DATASET (REAL BACKEND DATA):
+Filename: ${activeTabular.filename}
+Total Parsed Records: ${activeTabular.rows?.length || 0}
+Available Column Headers: ${JSON.stringify(activeTabular.headers || [])}
+First 10 Rows (Real Parsed JSON Array):
+${JSON.stringify(sampleRows, null, 2)}
+
+Strictly base your calculations, summaries, and GenUI tables ONLY on the real data provided by the backend tools. NEVER hallucinate, invent, or use dummy financial numbers. If the tool returns empty data, explicitly state that the data was not received.`;
+
+            console.log(`[RAG Chat] Attached verified tabular context for: ${activeTabular.filename} (${activeTabular.rows?.length} rows)`);
           } catch (mErr) {
             console.warn('[RAG Chat] Error attaching tabular manifest:', mErr);
           }
@@ -563,6 +605,7 @@ router.post('/', async (req, res) => {
             render_financial_table: renderFinancialTableTool,
             calculate_financial_metrics: calculateFinancialMetricsTool,
             query_tabular_dataset: queryTabularDatasetTool,
+            get_dataset_records: getDatasetRecordsTool,
             cross_reference_documents: crossReferenceDocumentsTool,
           },
         });
@@ -587,10 +630,9 @@ router.post('/', async (req, res) => {
     }
 
     // 2. SIMULATED STREAMED RESPONSE (Fallback for demo/offline/rate-limited mode)
-    const activeTabularFallback = getRegisteredDataset(attachedDocName) || getAllRegisteredDatasets()[0] || null;
     const simulatedFullText = getSimulatedFinancialResponse(
       userPromptText || 'Financial Overview',
-      activeTabularFallback
+      activeTabular
     );
     const responseId = `sim-resp-${Date.now()}`;
     const words = simulatedFullText.split(/(?<=\s+)/);

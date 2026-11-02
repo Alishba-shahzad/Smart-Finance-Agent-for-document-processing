@@ -1,4 +1,4 @@
-import { parse as parseCsvSync } from 'csv-parse/sync';
+import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 
 /**
@@ -15,8 +15,8 @@ export function parseFinancialNumber(val) {
   if (typeof val === 'number') return isNaN(val) ? null : val;
   if (typeof val !== 'string') return null;
 
-  let s = val.trim();
-  if (!s || s === '-' || s === 'N/A' || s === 'null') return null;
+  let s = val.trim().replace(/^["']|["']$/g, '').trim();
+  if (!s || s === '-' || s === 'N/A' || s === 'null' || s.toLowerCase() === 'unknown') return null;
 
   // Check for accounting negative format: (1,234.56)
   const isAccountingNegative = /^\(.*\)$/.test(s);
@@ -50,6 +50,7 @@ export function formatNumber(num) {
 
 /**
  * Parse CSV or Excel buffer into structured array of row objects
+ * Uses PapaParse for CSV parsing with auto-detection and semicolon (';') support for files like 'train.csv'.
  */
 export function parseTabularBuffer(buffer, filename = 'document.csv') {
   const lowerName = filename.toLowerCase();
@@ -75,20 +76,70 @@ export function parseTabularBuffer(buffer, filename = 'document.csv') {
     };
   }
 
-  // Parse CSV
-  const csvText = buffer.toString('utf-8');
-  const records = parseCsvSync(csvText, {
-    columns: true,
-    skip_empty_lines: true,
-    trim: true,
-    relax_column_count: true,
-  });
+  // Parse CSV with PapaParse supporting semicolon (';'), comma (','), tab, and auto-detection
+  const csvText = buffer.toString('utf-8').replace(/^\uFEFF/, '');
+  const firstLine = csvText.split(/\r\n|\n|\r/)[0] || '';
 
-  const headers = records.length > 0 ? Object.keys(records[0]) : [];
+  // Determine if file is 'train.csv' or uses semicolon (';') delimiter
+  let delimiter = '';
+  if (
+    lowerName.includes('train.csv') ||
+    lowerName.includes('train') ||
+    (firstLine.includes(';') && !firstLine.includes(','))
+  ) {
+    delimiter = ';';
+  }
+
+  const papaConfig = {
+    header: true,
+    skipEmptyLines: 'greedy',
+    delimitersToGuess: [';', ',', '\t', '|'],
+    transformHeader: (header) => header.trim().replace(/^["']|["']$/g, ''),
+  };
+
+  if (delimiter) {
+    papaConfig.delimiter = delimiter;
+  }
+
+  let parsed = Papa.parse(csvText, papaConfig);
+
+  // Fallback: If auto-detection resulted in only 1 header field but line contains ';', re-parse with delimiter ';'
+  if (
+    (!parsed.meta?.fields || parsed.meta.fields.length <= 1) &&
+    firstLine.includes(';')
+  ) {
+    parsed = Papa.parse(csvText, {
+      ...papaConfig,
+      delimiter: ';',
+    });
+  }
+
+  // Filter out empty rows
+  let records = (parsed.data || []).filter(
+    (row) =>
+      row &&
+      Object.values(row).some(
+        (v) => v !== null && v !== undefined && String(v).trim() !== ''
+      )
+  );
+
+  let headers = parsed.meta?.fields
+    ? parsed.meta.fields.map((h) => h.trim().replace(/^["']|["']$/g, ''))
+    : [];
+
+  if (headers.length === 0 && records.length > 0) {
+    headers = Object.keys(records[0]);
+  }
+
+  console.log(
+    `[TabularEngine] Successfully parsed "${filename}": ${records.length} records, ${headers.length} columns using delimiter "${parsed.meta?.delimiter || delimiter || ','}".`
+  );
+
   return {
     headers,
     rows: records,
     totalRows: records.length,
+    delimiter: parsed.meta?.delimiter || delimiter || ',',
   };
 }
 
@@ -103,6 +154,12 @@ export function profileTabularDataset(rows, headers, filename = 'document.csv') 
       totalRows: 0,
       columns: {},
       summary: 'Empty dataset',
+      financialInsights: {
+        totalPortfolioVolume: 0,
+        amountColumns: [],
+        statusColumns: [],
+        delinquencySummary: null,
+      },
     };
   }
 
@@ -156,7 +213,11 @@ export function profileTabularDataset(rows, headers, filename = 'document.csv') 
             topValues: Array.from(valueFrequencies.entries())
               .sort((a, b) => b[1] - a[1])
               .slice(0, 10)
-              .map(([v, count]) => ({ value: v, count, pct: ((count / totalRows) * 100).toFixed(1) + '%' })),
+              .map(([v, count]) => ({
+                value: v,
+                count,
+                pct: ((count / totalRows) * 100).toFixed(1) + '%',
+              })),
           }),
     };
   }
@@ -171,7 +232,17 @@ export function profileTabularDataset(rows, headers, filename = 'document.csv') 
 
   for (const [header, stat] of Object.entries(columnStats)) {
     const lower = header.toLowerCase();
-    if (stat.isNumeric && (lower.includes('amount') || lower.includes('balance') || lower.includes('loan') || lower.includes('principal') || lower.includes('total') || lower.includes('payment'))) {
+    if (
+      stat.isNumeric &&
+      (lower.includes('amount') ||
+        lower.includes('balance') ||
+        lower.includes('loan') ||
+        lower.includes('principal') ||
+        lower.includes('total') ||
+        lower.includes('payment') ||
+        lower.includes('duration') ||
+        lower.includes('campaign'))
+    ) {
       financialInsights.amountColumns.push({
         column: header,
         total: stat.sum,
@@ -179,12 +250,29 @@ export function profileTabularDataset(rows, headers, filename = 'document.csv') 
         min: stat.min,
         max: stat.max,
       });
-      if (financialInsights.totalPortfolioVolume === 0 || lower.includes('balance') || lower.includes('loan_amount')) {
+      if (
+        financialInsights.totalPortfolioVolume === 0 ||
+        lower.includes('balance') ||
+        lower.includes('loan_amount')
+      ) {
         financialInsights.totalPortfolioVolume = stat.sum;
       }
     }
 
-    if (!stat.isNumeric && (lower.includes('status') || lower.includes('stage') || lower.includes('grade') || lower.includes('condition'))) {
+    if (
+      !stat.isNumeric &&
+      (lower.includes('status') ||
+        lower.includes('stage') ||
+        lower.includes('grade') ||
+        lower.includes('condition') ||
+        lower.includes('default') ||
+        lower.includes('housing') ||
+        lower.includes('loan') ||
+        lower.includes('education') ||
+        lower.includes('job') ||
+        lower.includes('marital') ||
+        lower === 'y')
+    ) {
       financialInsights.statusColumns.push({
         column: header,
         breakdown: stat.topValues,
@@ -203,7 +291,6 @@ export function profileTabularDataset(rows, headers, filename = 'document.csv') 
 
 /**
  * Generate 3-5 rich, compact semantic RAG manifest chunks for vector indexing
- * This replaces 15,000 fragmented text chunks with deterministic master context!
  */
 export function generateTabularManifestChunks(profile, rows) {
   const chunks = [];
@@ -216,22 +303,22 @@ Total Record Count: ${formatNumber(totalRows)} rows
 Available Columns (${headers.length}): ${headers.join(', ')}
 
 Key Financial Aggregates:
-- Primary Financial Volume / Balance: ${formatCurrency(financialInsights.totalPortfolioVolume)}
+- Primary Financial Volume / Balance: ${formatCurrency(financialInsights?.totalPortfolioVolume || 0)}
 `;
 
-  if (financialInsights.amountColumns.length > 0) {
+  if (financialInsights?.amountColumns?.length > 0) {
     chunk1 += `\nSignificant Financial Columns Summary:\n`;
     for (const col of financialInsights.amountColumns) {
       chunk1 += `* ${col.column}: Total = ${formatCurrency(col.total)} | Average = ${formatCurrency(col.average)} | Min = ${formatCurrency(col.min)} | Max = ${formatCurrency(col.max)}\n`;
     }
   }
 
-  if (financialInsights.statusColumns.length > 0) {
-    chunk1 += `\nStatus & Portfolio Categorization:\n`;
+  if (financialInsights?.statusColumns?.length > 0) {
+    chunk1 += `\nStatus & Categorization Breakdown:\n`;
     for (const stat of financialInsights.statusColumns) {
       chunk1 += `* Column "${stat.column}":\n`;
       for (const val of (stat.breakdown || []).slice(0, 8)) {
-        chunk1 += `  - ${val.value}: ${formatNumber(val.count)} loans/records (${val.pct})\n`;
+        chunk1 += `  - ${val.value}: ${formatNumber(val.count)} records (${val.pct})\n`;
       }
     }
   }
@@ -244,7 +331,7 @@ File: ${filename} (Total: ${formatNumber(totalRows)} records)
 
 Detailed Metrics by Column:\n`;
 
-  for (const [colName, stat] of Object.entries(columns)) {
+  for (const [colName, stat] of Object.entries(columns || {})) {
     if (stat.isNumeric) {
       chunk2 += `- [Numeric] "${colName}":
     Sum: ${stat.sum.toLocaleString('en-US', { maximumFractionDigits: 2 })}
@@ -287,16 +374,36 @@ export function registerDataset(documentId, dataset) {
   datasetStore.set(String(documentId), dataset);
   if (dataset.filename) {
     datasetStore.set(dataset.filename.toLowerCase(), dataset);
+    datasetStore.set(dataset.filename, dataset);
   }
 }
 
 /**
- * Retrieve registered dataset
+ * Retrieve registered dataset with fuzzy and multi-match support
  */
 export function getRegisteredDataset(identifier) {
   if (!identifier) return null;
-  const strId = String(identifier).toLowerCase();
-  return datasetStore.get(identifier) || datasetStore.get(strId) || null;
+  const rawId = String(identifier).trim();
+  const lowerId = rawId.toLowerCase();
+
+  if (datasetStore.has(rawId)) return datasetStore.get(rawId);
+  if (datasetStore.has(lowerId)) return datasetStore.get(lowerId);
+
+  // Check comma/semicolon-separated list of filenames (e.g. from multiple attachments)
+  const parts = lowerId.split(/[,;\n]+/).map((p) => p.trim()).filter(Boolean);
+  for (const part of parts) {
+    if (datasetStore.has(part)) return datasetStore.get(part);
+  }
+
+  // Substring matching: e.g. "train.csv" in "train.csv, doc2.pdf" or "train"
+  for (const [key, val] of datasetStore.entries()) {
+    const k = String(key).toLowerCase();
+    if (k && (lowerId.includes(k) || k.includes(lowerId))) {
+      return val;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -307,6 +414,8 @@ export function getAllRegisteredDatasets() {
   for (const [, ds] of datasetStore.entries()) {
     if (ds.documentId && !unique.has(ds.documentId)) {
       unique.set(ds.documentId, ds);
+    } else if (ds.filename && !unique.has(ds.filename)) {
+      unique.set(ds.filename, ds);
     }
   }
   return Array.from(unique.values());
@@ -316,16 +425,21 @@ export function getAllRegisteredDatasets() {
  * Deterministic Filter & Aggregate Query Engine
  */
 export function queryTabularData(dataset, options = {}) {
-  const { filterColumn, filterValue, filterOperator = 'equals', sortBy, sortOrder = 'desc', limit = 20 } = options;
+  const { filterColumn, filterValue, filterOperator = 'equals', sortBy, sortOrder = 'desc', limit = 20, offset = 0 } = options;
   let resultRows = [...dataset.rows];
 
   if (filterColumn && filterValue !== undefined) {
+    const matchingCol =
+      dataset.headers.find(
+        (h) => h.toLowerCase() === filterColumn.toLowerCase() || h.toLowerCase().includes(filterColumn.toLowerCase())
+      ) || filterColumn;
+
     resultRows = resultRows.filter((r) => {
-      const cellVal = r[filterColumn];
+      const cellVal = r[matchingCol];
       if (cellVal === undefined || cellVal === null) return false;
 
       if (filterOperator === 'equals') {
-        return String(cellVal).toLowerCase() === String(filterValue).toLowerCase();
+        return String(cellVal).trim().toLowerCase() === String(filterValue).trim().toLowerCase();
       }
       if (filterOperator === 'contains') {
         return String(cellVal).toLowerCase().includes(String(filterValue).toLowerCase());
@@ -346,9 +460,14 @@ export function queryTabularData(dataset, options = {}) {
 
   // Sort
   if (sortBy) {
+    const matchingSortCol =
+      dataset.headers.find(
+        (h) => h.toLowerCase() === sortBy.toLowerCase() || h.toLowerCase().includes(sortBy.toLowerCase())
+      ) || sortBy;
+
     resultRows.sort((a, b) => {
-      const valA = a[sortBy];
-      const valB = b[sortBy];
+      const valA = a[matchingSortCol];
+      const valB = b[matchingSortCol];
       const numA = parseFinancialNumber(valA);
       const numB = parseFinancialNumber(valB);
 
@@ -362,7 +481,8 @@ export function queryTabularData(dataset, options = {}) {
   }
 
   const totalFilteredCount = resultRows.length;
-  const slicedRows = resultRows.slice(0, limit);
+  const start = Math.max(offset, 0);
+  const slicedRows = resultRows.slice(start, start + limit);
 
   // Compute subtotals for numeric columns in the filtered set
   const subtotals = {};
@@ -392,7 +512,7 @@ export function queryTabularData(dataset, options = {}) {
     returnedRowsCount: slicedRows.length,
     headers: dataset.headers,
     rows: slicedRows,
+    records: slicedRows, // Parsed JSON array passed directly
     subtotals,
   };
 }
-

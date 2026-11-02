@@ -6,6 +6,7 @@ import {
   parseTabularBuffer,
   profileTabularDataset,
   registerDataset,
+  getRegisteredDataset,
 } from '../lib/rag/tabularEngine.js';
 
 const router = Router();
@@ -182,6 +183,33 @@ router.post('/', upload.single('file'), (req, res) => {
 });
 
 /**
+ * GET /api/documents/:id/data
+ * Return parsed tabular JSON records for the uploaded document
+ */
+router.get('/:id/data', (req, res) => {
+  const { id } = req.params;
+  const dataset = getRegisteredDataset(id);
+  if (!dataset) {
+    return res.status(404).json({
+      success: false,
+      message: 'Tabular dataset not found or data was not received.',
+      data: null,
+    });
+  }
+  return res.status(200).json({
+    success: true,
+    data: {
+      documentId: dataset.documentId,
+      filename: dataset.filename,
+      headers: dataset.headers,
+      totalRows: dataset.rows?.length || 0,
+      rows: dataset.rows?.slice(0, 100),
+    },
+    message: 'Parsed tabular dataset retrieved successfully.',
+  });
+});
+
+/**
  * GET /api/documents/:id/process
  * Get current processing status and indexed chunk count for a document
  */
@@ -352,4 +380,3 @@ router.delete('/:id', (req, res) => {
 });
 
 export default router;
-
