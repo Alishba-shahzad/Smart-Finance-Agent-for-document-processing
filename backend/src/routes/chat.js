@@ -413,9 +413,8 @@ function getSimulatedFinancialResponse(prompt, activeTabular) {
 
 function resolveGeminiModel() {
   const envModel = process.env.GEMINI_MODEL?.trim();
-  if (!envModel) return 'gemini-2.5-flash';
-  if (envModel === 'gemini-3.5-flash') return 'gemini-2.5-flash';
-  return envModel;
+  if (envModel) return envModel;
+  return 'gemini-2.0-flash';
 }
 
 /**
