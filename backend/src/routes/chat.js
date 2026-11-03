@@ -46,6 +46,10 @@ Professional Persona & Standards:
    - Strictly base your calculations, summaries, and GenUI tables ONLY on the real data provided by the backend tools. NEVER hallucinate, invent, or use dummy financial numbers. If the tool returns empty data, explicitly state that the data was not received.
    - For any mathematical totals, sums, averages, loan summaries, or record counts across datasets, always utilize the provided calculation and query tools ('calculate_financial_metrics', 'query_tabular_dataset', 'get_dataset_records', 'cross_reference_documents').
    - Never approximate or guess numbers when exact data can be computed.
+5. Data Visualization and Interactive Charts:
+   - When the user asks to "visualize", "show me visualize", "render a chart", "show chart", "plot", or "graph":
+     * You MUST render an interactive financial chart by calling the tool 'render_financial_chart' OR including the marker tag '<!-- GENUI:BAR_CHART -->' in your response.
+     * Deliver executive textual commentary explaining the trend and key variance points first, followed by the chart.
 4. Multi-Document Cross-Referencing:
    - When multiple documents (PDFs, CSVs, Excel files) are present, cross-reference their figures, detect discrepancies, and provide reconciled financial intelligence.
    - Cite specific documents by filename, filing section, or invoice number in square brackets (e.g. [Source: train.csv, Row Audit]).`;
@@ -53,6 +57,49 @@ Professional Persona & Standards:
 /**
  * Tool: Render Interactive Financial Schedule in GenUI
  */
+
+/**
+ * Tool: Render Interactive Financial Bar Chart in GenUI
+ */
+export const renderFinancialChartTool = tool({
+  description:
+    'Renders an interactive financial bar or comparison chart in GenUI whenever the user asks to visualize data, see charts, or compare metrics graphically.',
+  parameters: z.object({
+    title: z.string().describe('Title of the financial chart'),
+    subtitle: z.string().optional().describe('Subtitle or context description'),
+    sourceFiling: z.string().optional().describe('Source filing citation or document name'),
+    seriesData: z
+      .array(
+        z.object({
+          period: z.string().describe('Label or period (e.g. "2024", "Q1", "Category A")'),
+          revenue: z.number().optional().describe('Primary metric value in millions or standard unit'),
+          grossProfit: z.number().optional().describe('Second metric value'),
+          operatingIncome: z.number().optional().describe('Third metric value'),
+          ebitda: z.number().optional().describe('Fourth metric value'),
+          value: z.number().optional().describe('Generic single metric value if applicable'),
+          metricLabel: z.string().optional().describe('Label for the value'),
+        })
+      )
+      .optional()
+      .describe('Array of data points for the chart'),
+    metrics: z
+      .array(
+        z.object({
+          label: z.string(),
+          value: z.string(),
+          change: z.string().optional(),
+          positive: z.boolean().optional(),
+          highlight: z.boolean().optional(),
+        })
+      )
+      .optional()
+      .describe('Summary KPI cards to display above the chart'),
+  }),
+  execute: async (args) => {
+    return args;
+  },
+});
+
 export const renderFinancialTableTool = tool({
   description:
     'Renders financial metrics, loan schedules, statements, or invoice audits in an interactive structured UI table with client-side sorting, filtering, and summary totals.',
@@ -359,6 +406,12 @@ export const crossReferenceDocumentsTool = tool({
 });
 
 function getSimulatedFinancialResponse(prompt, activeTabular) {
+  const lower = (prompt || '').toLowerCase();
+  const isVisualizeRequest =
+    lower.includes('visualize') ||
+    lower.includes('chart') ||
+    lower.includes('graph') ||
+    lower.includes('plot');
   if (activeTabular && activeTabular.rows && activeTabular.rows.length > 0 && activeTabular.profile) {
     const { totalRows, headers, financialInsights } = activeTabular.profile;
     const sampleRows = activeTabular.rows.slice(0, 8);
@@ -398,7 +451,10 @@ function getSimulatedFinancialResponse(prompt, activeTabular) {
       `#### 3. Forensic Financial Insights & Risk Findings\n` +
       `- All row-level calculations, totals, and column mappings have been computed deterministically from real backend data.\n` +
       `- Dataset schema features **${headers.length} columns**: ${headers.join(', ')}.\n\n` +
-      `*Notice: Strictly based on real data provided by backend tools. Zero dummy financial numbers.*`
+      `*Notice: Strictly based on real data provided by backend tools. Zero dummy financial numbers.* +
+      (isVisualizeRequest
+        ? '\n\n#### 4. Interactive Data Visualization\nBelow is the interactive visual schedule rendering key financial metrics and comparative performance:\n\n<!-- GENUI:BAR_CHART -->\n'
+        : '')`
     );
   }
 
@@ -602,6 +658,7 @@ Strictly base your calculations, summaries, and GenUI tables ONLY on the real da
           maxSteps: 5,
           tools: {
             render_financial_table: renderFinancialTableTool,
+            render_financial_chart: renderFinancialChartTool,
             calculate_financial_metrics: calculateFinancialMetricsTool,
             query_tabular_dataset: queryTabularDatasetTool,
             get_dataset_records: getDatasetRecordsTool,

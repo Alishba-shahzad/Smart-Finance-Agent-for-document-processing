@@ -759,16 +759,38 @@ export default function ChatPage() {
   /**
    * Helper to parse streaming assistant response and dynamically inject GenUI components
    */
-  const renderMessageContent = (text) => {
+  const renderMessageContent = (text, messageIndex) => {
     if (!text || !text.trim()) return null;
 
-    const hasBarChart = text.includes('<!-- GENUI:BAR_CHART -->');
+    let hasBarChart =
+      text.includes('<!-- GENUI:BAR_CHART -->') ||
+      text.includes('<!-- GENUI:CHART -->') ||
+      text.includes('<!-- GENUI:VISUALIZE -->');
     const hasBalanceSheet = text.includes('<!-- GENUI:BALANCE_SHEET_TABLE -->');
     const hasInvoice = text.includes('<!-- GENUI:INVOICE_TABLE -->');
     const hasDocRegistry = text.includes('<!-- GENUI:DOCUMENTS_REGISTRY -->');
 
+    // If user's prompt asked to visualize or render chart, always render chart
+    if (!hasBarChart && typeof messageIndex === 'number') {
+      const precedingUserMsg = messages
+        .slice(0, messageIndex)
+        .reverse()
+        .find((m) => m.role === 'user');
+      const userPrompt = (getMessageText(precedingUserMsg) || '').toLowerCase();
+      if (
+        userPrompt.includes('visualize') ||
+        userPrompt.includes('chart') ||
+        userPrompt.includes('graph') ||
+        userPrompt.includes('plot')
+      ) {
+        hasBarChart = true;
+      }
+    }
+
     const cleanText = text
       .replace('<!-- GENUI:BAR_CHART -->', '')
+      .replace('<!-- GENUI:CHART -->', '')
+      .replace('<!-- GENUI:VISUALIZE -->', '')
       .replace('<!-- GENUI:BALANCE_SHEET_TABLE -->', '')
       .replace('<!-- GENUI:INVOICE_TABLE -->', '')
       .replace('<!-- GENUI:DOCUMENTS_REGISTRY -->', '')
@@ -998,7 +1020,7 @@ export default function ChatPage() {
           /* REAL-TIME STREAMING MESSAGE LIST WITH GENUI RENDERING          */
           /* ============================================================= */
           <div className="max-w-3xl mx-auto w-full space-y-6 pb-6">
-            {messages.map((message) => {
+            {messages.map((message, messageIndex) => {
               const isAssistant = message.role === 'assistant';
               const textContent = getMessageText(message);
               const reasoningContent = getReasoningText(message);
@@ -1109,7 +1131,7 @@ export default function ChatPage() {
                         {/* 1. Regular Markdown Text Response (message.content / text parts) */}
                         {textContent.trim() ? (
                           <div className="prose-content">
-                            {renderMessageContent(textContent)}
+                            {renderMessageContent(textContent, messageIndex)}
                           </div>
                         ) : null}
 
@@ -1124,6 +1146,26 @@ export default function ChatPage() {
                             payload,
                             state
                           ) => {
+                            const isChartTool =
+                              name === 'render_financial_chart' ||
+                              name === 'renderFinancialChart' ||
+                              name?.endsWith('render_financial_chart') ||
+                              name?.endsWith('renderFinancialChart');
+
+                            if (isChartTool && !seenIds.has(id)) {
+                              seenIds.add(id);
+                              renderedTables.push(
+                                <FinancialBarChart
+                                  key={id}
+                                  title={payload?.title || 'Financial Performance & Metrics Visualization'}
+                                  subtitle={payload?.subtitle || 'GenUI Interactive Data Chart • Multi-Period & Metric Breakdown'}
+                                  sourceFiling={payload?.sourceFiling || 'Verified Financial Statements'}
+                                  seriesData={payload?.seriesData}
+                                  kpis={payload?.metrics || payload?.kpis}
+                                />
+                              );
+                            }
+
                             const isTableTool =
                               name === 'render_financial_table' ||
                               name === 'renderFinancialTable' ||
@@ -1278,6 +1320,23 @@ export default function ChatPage() {
                                   ...(typeof inv.result === 'object' && inv.result ? inv.result : {}),
                                 };
                                 processInvocation(id, name, payload, inv.state);
+                              } else if (
+                                part.type === 'tool-render_financial_chart' ||
+                                part.type === 'render_financial_chart' ||
+                                part.type === 'tool-renderFinancialChart' ||
+                                part.type === 'renderFinancialChart' ||
+                                (part.type === 'dynamic-tool' &&
+                                  (part.toolName === 'render_financial_chart' ||
+                                    part.toolName === 'renderFinancialChart'))
+                              ) {
+                                const id = part.toolCallId || part.id || `tool-part-${idx}`;
+                                const payload = {
+                                  ...(typeof part.input === 'object' && part.input ? part.input : {}),
+                                  ...(typeof part.output === 'object' && part.output ? part.output : {}),
+                                  ...(typeof part.args === 'object' && part.args ? part.args : {}),
+                                  ...(typeof part.result === 'object' && part.result ? part.result : {}),
+                                };
+                                processInvocation(id, 'render_financial_chart', payload, part.state);
                               } else if (
                                 part.type === 'tool-render_financial_table' ||
                                 part.type === 'render_financial_table' ||
