@@ -413,7 +413,7 @@ const markdownComponents = {
 
 // GenUI and Ingestion components
 import FinancialBarChart from '@/components/chat/FinancialBarChart';
-import FinancialDataTable from '@/components/chat/FinancialDataTable';
+import DynamicFinancialChart from '@/components/chat/DynamicFinancialChart';
 import DocumentUploadModal from '@/components/chat/DocumentUploadModal';
 
 /**
@@ -504,6 +504,7 @@ export default function ChatPage() {
   const isSubmitting = status === 'submitted' || status === 'streaming';
   const [inputValue, setInputValue] = useState('');
   const [attachedFiles, setAttachedFiles] = useState([]);
+  const [activeDocument, setActiveDocument] = useState(null);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -603,6 +604,9 @@ export default function ChatPage() {
     }));
 
     setAttachedFiles((prev) => [...prev, ...newItems]);
+    if (newItems.length > 0) {
+      setActiveDocument(newItems[newItems.length - 1].name);
+    }
     newItems.forEach((item) => {
       setSelectedDocuments((prev) => (prev.includes(item.name) ? prev : [item.name, ...prev]));
     });
@@ -682,10 +686,21 @@ export default function ChatPage() {
     if (!text.trim() && attachedFiles.length === 0) return;
 
     let fullPrompt = text;
+    let currentActive = activeDocument;
+
     if (attachedFiles.length > 0) {
+      // User attached a NEW file: immediately update active document state!
+      const newestFile = attachedFiles[attachedFiles.length - 1];
+      currentActive = newestFile.name;
+      setActiveDocument(currentActive);
+
       const fileListStr = attachedFiles.map((f) => f.name).join(', ');
       const userQuestion = text.trim() || 'Please analyze the attached financial document(s) and extract key metrics.';
       fullPrompt = `[Documents Attached (${attachedFiles.length}): ${fileListStr}]\n\n${userQuestion}`;
+    } else if (currentActive) {
+      // Follow-up query without attachment: automatically inject active document context!
+      const userQuestion = text.trim();
+      fullPrompt = `[Active Document Context: ${currentActive}]\n\n${userQuestion}`;
     }
 
     // Save dynamically to Recent Queries
@@ -736,6 +751,9 @@ export default function ChatPage() {
   };
 
   const handleUploadComplete = (newDocName) => {
+    if (newDocName) {
+      setActiveDocument(newDocName);
+    }
     setAttachedFiles((prev) => [
       ...prev,
       {
@@ -753,6 +771,7 @@ export default function ChatPage() {
     setMessages([]);
     setInputValue('');
     setAttachedFiles([]);
+    setActiveDocument(null);
     setExpandedReasoning({});
   };
 
@@ -762,30 +781,7 @@ export default function ChatPage() {
   const renderMessageContent = (text, messageIndex) => {
     if (!text || !text.trim()) return null;
 
-    let hasBarChart =
-      text.includes('<!-- GENUI:BAR_CHART -->') ||
-      text.includes('<!-- GENUI:CHART -->') ||
-      text.includes('<!-- GENUI:VISUALIZE -->');
-    const hasBalanceSheet = text.includes('<!-- GENUI:BALANCE_SHEET_TABLE -->');
-    const hasInvoice = text.includes('<!-- GENUI:INVOICE_TABLE -->');
     const hasDocRegistry = text.includes('<!-- GENUI:DOCUMENTS_REGISTRY -->');
-
-    // If user's prompt asked to visualize or render chart, always render chart
-    if (!hasBarChart && typeof messageIndex === 'number') {
-      const precedingUserMsg = messages
-        .slice(0, messageIndex)
-        .reverse()
-        .find((m) => m.role === 'user');
-      const userPrompt = (getMessageText(precedingUserMsg) || '').toLowerCase();
-      if (
-        userPrompt.includes('visualize') ||
-        userPrompt.includes('chart') ||
-        userPrompt.includes('graph') ||
-        userPrompt.includes('plot')
-      ) {
-        hasBarChart = true;
-      }
-    }
 
     const cleanText = text
       .replace('<!-- GENUI:BAR_CHART -->', '')
@@ -804,35 +800,6 @@ export default function ChatPage() {
               {cleanText}
             </ReactMarkdown>
           </MarkdownErrorBoundary>
-        )}
-
-        {/* Dynamic GenUI: Financial Bar Chart */}
-        {hasBarChart && (
-          <FinancialBarChart
-            title="Beta Tech Q3 Financial Metrics: 2024 vs 2025"
-            subtitle="Operating Leverage & EBITDA Reconciliation (Item 1, Form 10-Q)"
-            sourceFiling="Beta_Tech_Q3_Financial_Statement.pdf (p. 14)"
-          />
-        )}
-
-        {/* Dynamic GenUI: Balance Sheet Data Table */}
-        {hasBalanceSheet && (
-          <FinancialDataTable
-            type="balanceSheet"
-            title="Consolidated Balance Sheet: YoY Structural Shift"
-            subtitle="Alpha Corp Item 8 Form 10-K Audit (in Millions USD)"
-            sourceDoc="Alpha_Corp_2025_10K_Annual_Report.pdf (p. 28)"
-          />
-        )}
-
-        {/* Dynamic GenUI: Invoice Audit Table */}
-        {hasInvoice && (
-          <FinancialDataTable
-            type="invoice"
-            title="Invoice #INV-2026-9812: Forensic Line-Item Audit"
-            subtitle="Global Cloud Logistics LLC (Verified Line Items vs Final Payable)"
-            sourceDoc="Commercial_Vendor_Invoice_INV9812.pdf"
-          />
         )}
 
         {/* Dynamic GenUI: Document Ingestion Launcher */}
@@ -903,7 +870,11 @@ export default function ChatPage() {
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
             )}
             <span className={isSubmitting ? 'text-[#1a56db] font-medium' : ''}>
-              {isSubmitting ? 'Streaming analysis...' : `${selectedDocuments.length} Filings Active`}
+              {isSubmitting
+                ? 'Streaming analysis...'
+                : activeDocument
+                ? `Active Document: ${activeDocument}`
+                : `${selectedDocuments.length} Filings Active`}
             </span>
           </div>
         </div>
@@ -1100,31 +1071,30 @@ export default function ChatPage() {
                         {/* Loading placeholder while waiting for initial tokens or if stream finishes without text */}
                         {!textContent.trim() && (
                           <div className="space-y-3 py-1">
-                            <div className="flex items-center gap-2.5 text-xs text-slate-700 font-medium">
-                              {isStreamingThisMessage ? (
-                                <Loader2 className="w-4 h-4 animate-spin text-[#1a56db]" />
-                              ) : (
-                                <AutoAwesomeIcon sx={{ fontSize: 16 }} className="text-[#1a56db]" />
-                              )}
-                              <span>
-                                {isStreamingThisMessage
-                                  ? 'Financial Analyst is computing aggregates & structuring analysis...'
-                                  : 'Financial Analyst evaluation complete'}
-                              </span>
-                            </div>
                             {isStreamingThisMessage ? (
-                              <div className="space-y-2 py-0.5">
-                                <div className="h-2.5 bg-slate-200/80 rounded-full w-4/5 animate-pulse"></div>
-                                <div className="h-2.5 bg-slate-200/60 rounded-full w-3/5 animate-pulse"></div>
-                              </div>
-                            ) : (
+                              <>
+                                <div className="flex items-center gap-2.5 text-xs text-slate-700 font-medium">
+                                  <Loader2 className="w-4 h-4 animate-spin text-[#1a56db]" />
+                                  <span>
+                                    Financial Analyst is computing aggregates & structuring analysis...
+                                  </span>
+                                </div>
+                                <div className="space-y-2 py-0.5">
+                                  <div className="h-2.5 bg-slate-200/80 rounded-full w-4/5 animate-pulse"></div>
+                                  <div className="h-2.5 bg-slate-200/60 rounded-full w-3/5 animate-pulse"></div>
+                                </div>
+                              </>
+                            ) : !hasToolInvocations ? (
                               <div className="p-3 bg-blue-50/50 border border-blue-200/70 rounded-xl text-xs text-slate-700">
-                                <p className="font-semibold text-[#1a56db] mb-1">Financial Dataset Evaluated</p>
+                                <div className="flex items-center gap-2 font-semibold text-[#1a56db] mb-1">
+                                  <AutoAwesomeIcon sx={{ fontSize: 16 }} />
+                                  <span>Financial Dataset Evaluated</span>
+                                </div>
                                 <p className="text-slate-600">
                                   The document data has been verified and registered in session memory. You can ask for exact totals, averages, delinquency rates, or specific category breakdowns.
                                 </p>
                               </div>
-                            )}
+                            ) : null}
                           </div>
                         )}
 
@@ -1147,23 +1117,42 @@ export default function ChatPage() {
                             state
                           ) => {
                             const isChartTool =
+                              name === 'render_financial_visualization' ||
+                              name === 'renderFinancialVisualization' ||
                               name === 'render_financial_chart' ||
                               name === 'renderFinancialChart' ||
-                              name?.endsWith('render_financial_chart') ||
-                              name?.endsWith('renderFinancialChart');
+                              name?.endsWith('render_financial_visualization') ||
+                              name?.endsWith('render_financial_chart');
 
                             if (isChartTool && !seenIds.has(id)) {
                               seenIds.add(id);
-                              renderedTables.push(
-                                <FinancialBarChart
-                                  key={id}
-                                  title={payload?.title || 'Financial Performance & Metrics Visualization'}
-                                  subtitle={payload?.subtitle || 'GenUI Interactive Data Chart • Multi-Period & Metric Breakdown'}
-                                  sourceFiling={payload?.sourceFiling || 'Verified Financial Statements'}
-                                  seriesData={payload?.seriesData}
-                                  kpis={payload?.metrics || payload?.kpis}
-                                />
-                              );
+                              const chartDataset = payload?.dataset || payload?.seriesData;
+                              if (Array.isArray(chartDataset) && chartDataset.length > 0) {
+                                renderedTables.push(
+                                  <DynamicFinancialChart
+                                    key={id}
+                                    chartType={payload?.chartType || 'bar'}
+                                    xAxisKey={payload?.xAxisKey}
+                                    dataKey={payload?.dataKey}
+                                    secondaryDataKey={payload?.secondaryDataKey}
+                                    dataset={chartDataset}
+                                    kpis={payload?.kpis || payload?.metrics}
+                                    title={payload?.title || 'Financial Performance & Metrics Visualization'}
+                                    subtitle={payload?.subtitle || 'Live Tabular Data Schedule'}
+                                    sourceFiling={payload?.sourceFiling || 'Verified Financial Dataset'}
+                                  />
+                                );
+                              } else if (state === 'call' || state === 'input-streaming' || isSubmitting) {
+                                renderedTables.push(
+                                  <div
+                                    key={id}
+                                    className="my-3 p-3 bg-blue-50/60 border border-blue-200 rounded-xl flex items-center gap-2 text-xs text-[#1a56db]"
+                                  >
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    <span>Rendering dynamic financial chart from live dataset...</span>
+                                  </div>
+                                );
+                              }
                             }
 
                             const isTableTool =
@@ -1236,7 +1225,16 @@ export default function ChatPage() {
                               }
                             } else if (isCalcTool && !seenIds.has(id)) {
                               seenIds.add(id);
-                              if (payload?.totalSumFormatted || payload?.totalPortfolioVolume || payload?.averageFormatted || payload?.delinquencyRateByCount) {
+                              if (
+                                payload?.totalSumFormatted ||
+                                payload?.totalSumHuman ||
+                                payload?.totalPortfolioVolume ||
+                                payload?.averageFormatted ||
+                                payload?.averageHuman ||
+                                payload?.resultHuman ||
+                                payload?.resultFormatted ||
+                                payload?.delinquencyRateByCount
+                              ) {
                                 renderedTables.push(
                                   <div key={id} className="my-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs shadow-2xs">
                                     <div className="flex items-center gap-1.5 font-semibold text-slate-800 mb-2">
@@ -1244,16 +1242,28 @@ export default function ChatPage() {
                                       <span>Deterministic Calculation: {payload.column || payload.targetColumn || payload.filename || 'Financial Metric'}</span>
                                     </div>
                                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
-                                      {payload.totalSumFormatted && (
+                                      {(payload.totalSumHuman || payload.totalSumFormatted) && (
                                         <div className="bg-white p-2 rounded-lg border border-slate-200/80">
                                           <div className="text-slate-400 font-medium text-[10px]">Total Aggregate</div>
-                                          <div className="font-bold font-mono text-slate-900 text-xs mt-0.5">{payload.totalSumFormatted}</div>
+                                          <div className="font-bold font-mono text-slate-900 text-xs mt-0.5">
+                                            {payload.totalSumHuman || payload.totalSumFormatted}
+                                          </div>
                                         </div>
                                       )}
-                                      {payload.averageFormatted && (
+                                      {(payload.averageHuman || payload.averageFormatted) && (
                                         <div className="bg-white p-2 rounded-lg border border-slate-200/80">
                                           <div className="text-slate-400 font-medium text-[10px]">Statistical Mean</div>
-                                          <div className="font-bold font-mono text-slate-900 text-xs mt-0.5">{payload.averageFormatted}</div>
+                                          <div className="font-bold font-mono text-slate-900 text-xs mt-0.5">
+                                            {payload.averageHuman || payload.averageFormatted}
+                                          </div>
+                                        </div>
+                                      )}
+                                      {(payload.resultHuman || payload.resultFormatted) && payload.operation !== 'sum' && payload.operation !== 'average' && (
+                                        <div className="bg-white p-2 rounded-lg border border-slate-200/80">
+                                          <div className="text-slate-400 font-medium text-[10px] capitalize">{payload.operation || 'Result'}</div>
+                                          <div className="font-bold font-mono text-slate-900 text-xs mt-0.5">
+                                            {payload.resultHuman || payload.resultFormatted}
+                                          </div>
                                         </div>
                                       )}
                                       {payload.totalPortfolioVolume && (
@@ -1321,12 +1331,18 @@ export default function ChatPage() {
                                 };
                                 processInvocation(id, name, payload, inv.state);
                               } else if (
+                                part.type === 'tool-render_financial_visualization' ||
+                                part.type === 'render_financial_visualization' ||
+                                part.type === 'tool-renderFinancialVisualization' ||
+                                part.type === 'renderFinancialVisualization' ||
                                 part.type === 'tool-render_financial_chart' ||
                                 part.type === 'render_financial_chart' ||
                                 part.type === 'tool-renderFinancialChart' ||
                                 part.type === 'renderFinancialChart' ||
                                 (part.type === 'dynamic-tool' &&
-                                  (part.toolName === 'render_financial_chart' ||
+                                  (part.toolName === 'render_financial_visualization' ||
+                                    part.toolName === 'renderFinancialVisualization' ||
+                                    part.toolName === 'render_financial_chart' ||
                                     part.toolName === 'renderFinancialChart'))
                               ) {
                                 const id = part.toolCallId || part.id || `tool-part-${idx}`;

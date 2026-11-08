@@ -21,9 +21,6 @@ coverage/
 
 
 # Environment files
-.env
-.env*
-**/.env
 **/.env*
 *.pem
 
@@ -39,3 +36,4 @@ Thumbs.db
 *.tsbuildinfo
 next-env.d.ts
 .vercel/
+config.bat

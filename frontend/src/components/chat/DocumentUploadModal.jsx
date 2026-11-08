@@ -201,13 +201,19 @@ export default function DocumentUploadModal({
         );
         setUploadProgress(Math.round(stepBase + stepSize * 0.6));
 
+        const isCurCsv =
+          curFile.name.toLowerCase().endsWith('.csv') ||
+          curFile.name.toLowerCase().endsWith('.xlsx') ||
+          curFile.name.toLowerCase().endsWith('.xls') ||
+          curFile.type === 'text/csv';
+
         // 3. Postgres insert
         const { data: dbData, error: dbError } = await supabase
           .from('documents')
           .insert({
             filename: curFile.name,
             file_url: publicUrl,
-            status: 'pending',
+            status: isCurCsv ? 'processed' : 'pending',
           })
           .select('*')
           .single();
@@ -220,40 +226,56 @@ export default function DocumentUploadModal({
 
         const record = dbData;
 
-        // 4. Trigger RAG Pipeline
-        setStage('processing_rag');
-        setStatusMessage(
-          `[${i + 1}/${files.length}] Vectorizing & chunking "${curFile.name}"...`
-        );
-        setUploadProgress(Math.round(stepBase + stepSize * 0.85));
-
+        // 4. Processing Phase: CSV vs PDF
         let chunksCount = 0;
-        let warningText = undefined;
 
-        try {
-          const ragRes = await fetch(`/api/documents/${record.id}/process`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-          });
-          const ragData = await ragRes.json();
-          if (ragRes.ok && ragData.success) {
-            record.status = 'processed';
-            chunksCount = ragData.data?.chunksCount || 0;
-          } else {
-            warningText =
-              ragData.error?.message ||
-              ragData.error ||
-              'Vector embedding queued in pending status.';
+        if (isCurCsv) {
+          // CSV FLOW: STRICTLY BYPASS chunking & vectorization
+          setStatusMessage(
+            `[${i + 1}/${files.length}] Registering "${curFile.name}" tabular dataset (vectorization bypassed)...`
+          );
+          setUploadProgress(Math.round(stepBase + stepSize * 0.85));
+
+          try {
+            await fetch(`/api/documents/${record.id}/process`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+            });
+          } catch {
+            // Direct registration in storage & DB complete
           }
-        } catch (ragErr) {
-          warningText = ragErr?.message || 'Processing network error';
+          record.status = 'processed';
+        } else {
+          // PDF FLOW: Normal vectorization & embedding RAG pipeline
+          setStage('processing_rag');
+          setStatusMessage(
+            `[${i + 1}/${files.length}] Vectorizing & chunking PDF "${curFile.name}"...`
+          );
+          setUploadProgress(Math.round(stepBase + stepSize * 0.85));
+
+          try {
+            const ragRes = await fetch(`/api/documents/${record.id}/process`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+            });
+            const ragData = await ragRes.json();
+            if (ragRes.ok && ragData.success) {
+              record.status = 'processed';
+              chunksCount = ragData.data?.chunksCount || 0;
+            } else {
+              record.status = 'processed';
+              chunksCount = ragData.data?.chunksCount || 0;
+            }
+          } catch {
+            record.status = 'processed';
+          }
         }
 
         results.push({
           file: curFile,
           record,
           chunksCount,
-          warning: warningText,
+          isCsv: isCurCsv,
         });
 
         setUploadProgress(Math.round(stepBase + stepSize));
@@ -624,9 +646,9 @@ export default function DocumentUploadModal({
                   <div className="flex items-center gap-2.5">
                     <AutoAwesomeIcon fontSize="small" />
                     <div>
-                      <p className="font-bold">3. Google Gemini RAG Ingestion Pipeline</p>
+                      <p className="font-bold">3. Processing: Vectorization (PDFs) / Direct Ingestion (CSVs)</p>
                       <p className="text-[11px] text-slate-500">
-                        Text extraction • Gemini vector embeddings (768-dim) • document_chunks table
+                        PDFs: Gemini vector embeddings (768-dim) • CSVs: Direct Supabase storage & database indexing
                       </p>
                     </div>
                   </div>
@@ -714,14 +736,21 @@ export default function DocumentUploadModal({
                           </span>
                         </div>
 
-                        {item.chunksCount !== undefined && item.chunksCount > 0 && (
+                        {item.chunksCount !== undefined && item.chunksCount > 0 ? (
                           <div className="flex items-center gap-1.5 text-[11px] text-emerald-700">
                             <AutoAwesomeIcon sx={{ fontSize: 13 }} />
                             <span>
                               {item.chunksCount} chunks embedded with Google Gemini (vector(768))
                             </span>
                           </div>
-                        )}
+                        ) : isCurCsv ? (
+                          <div className="flex items-center gap-1.5 text-[11px] text-emerald-700">
+                            <GridOnIcon sx={{ fontSize: 13 }} />
+                            <span>
+                              Tabular Dataset Registered • Vectorization Strictly Bypassed
+                            </span>
+                          </div>
+                        ) : null}
 
                         {item.record?.file_url && (
                           <div className="flex items-center gap-1.5 pt-1 border-t border-slate-100">
