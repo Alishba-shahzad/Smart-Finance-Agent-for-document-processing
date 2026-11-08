@@ -6,8 +6,8 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "dev": "node --watch --watch-path=src src/server.js",
-    "start": "node src/server.js"
+    "dev": "node init && node --watch --watch-path=src src/server.js",
+    "start": "node init && node src/server.js"
   },
   "dependencies": {
     "@ai-sdk/google": "^4.0.105",

@@ -409,19 +409,34 @@ export default function DashboardPage() {
       const publicUrl = publicUrlData.publicUrl;
 
       setUploadProgress(90);
+      const isCsv =
+        selectedFile.name.toLowerCase().endsWith('.csv') ||
+        selectedFile.name.toLowerCase().endsWith('.xlsx') ||
+        selectedFile.name.toLowerCase().endsWith('.xls');
+
       // 3. Insert record into Postgres 'documents' table
       const { data: dbData, error: dbError } = await supabase
         .from('documents')
         .insert({
           filename: selectedFile.name,
           file_url: publicUrl,
-          status: 'pending',
+          status: isCsv ? 'processed' : 'pending',
         })
         .select('*')
         .single();
 
       if (dbError) {
         throw new Error(`Database insert failed: ${dbError.message}`);
+      }
+
+      // Trigger backend registration or RAG processing
+      try {
+        await fetch(`/api/documents/${dbData.id}/process`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } catch {
+        // Direct upload already succeeded
       }
 
       const newDoc = {
@@ -434,7 +449,7 @@ export default function DashboardPage() {
         amount: 'Pending Review',
         fileSize: `${(selectedFile.size / 1024).toFixed(0)} KB`,
         pages: 1,
-        status: 'Pending',
+        status: isCsv ? 'Processed' : 'Pending',
         accuracy: 95.0,
         extractedEntities: [
           { label: 'Public File URL', value: publicUrl, confidence: 1.0 },
