@@ -1,5 +1,6 @@
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
+import { getSupabaseClient } from '../supabase.js';
 
 /**
  * In-memory registry to store parsed tabular datasets for fast deterministic queries
@@ -375,13 +376,18 @@ export function registerDataset(documentId, dataset) {
   if (dataset.filename) {
     datasetStore.set(dataset.filename.toLowerCase(), dataset);
     datasetStore.set(dataset.filename, dataset);
+    const baseName = dataset.filename.replace(/\.[^/.]+$/, '');
+    if (baseName && baseName !== dataset.filename) {
+      datasetStore.set(baseName.toLowerCase(), dataset);
+      datasetStore.set(baseName, dataset);
+    }
   }
 }
 
 /**
- * Retrieve registered dataset with fuzzy and multi-match support
+ * Synchronous in-memory lookup for registered dataset
  */
-export function getRegisteredDataset(identifier) {
+export function getRegisteredDatasetSync(identifier) {
   if (!identifier) return null;
   const rawId = String(identifier).trim();
   const lowerId = rawId.toLowerCase();
@@ -404,6 +410,203 @@ export function getRegisteredDataset(identifier) {
   }
 
   return null;
+}
+
+/**
+ * Fetches a tabular document from Supabase (via file_url or storage bucket),
+ * parses it with PapaParse (CSV) or XLSX (Excel), profiles it, and loads it into memory.
+ */
+export async function fetchAndRegisterTabularDoc(docRecord) {
+  if (!docRecord) return null;
+  const filename = docRecord.filename || 'dataset.csv';
+  let buffer = null;
+
+  // 1. Direct fetch from file_url if available
+  if (docRecord.file_url) {
+    try {
+      const res = await fetch(docRecord.file_url);
+      if (res.ok) {
+        const ab = await res.arrayBuffer();
+        buffer = Buffer.from(ab);
+      } else {
+        console.warn(`[TabularEngine] Direct fetch from file_url returned status ${res.status} for ${filename}`);
+      }
+    } catch (urlErr) {
+      console.warn(`[TabularEngine] Direct fetch failed for ${filename}:`, urlErr?.message || urlErr);
+    }
+  }
+
+  // 2. Fallback: Download directly from Supabase Storage bucket
+  if (!buffer) {
+    try {
+      const supabase = getSupabaseClient();
+      let storagePath = '';
+      if (docRecord.file_url && docRecord.file_url.includes('/financial_documents/')) {
+        storagePath = decodeURIComponent(docRecord.file_url.split('/financial_documents/')[1].split('?')[0]);
+      } else if (docRecord.file_url && !docRecord.file_url.startsWith('http')) {
+        storagePath = docRecord.file_url.replace(/^\/+/, '');
+      }
+
+      if (storagePath && supabase) {
+        const { data: blob, error: downloadError } = await supabase.storage
+          .from('financial_documents')
+          .download(storagePath);
+        if (!downloadError && blob) {
+          const ab = await blob.arrayBuffer();
+          buffer = Buffer.from(ab);
+        } else if (downloadError) {
+          console.warn(`[TabularEngine] Supabase storage download error for ${storagePath}:`, downloadError.message);
+        }
+      }
+    } catch (storageErr) {
+      console.warn(`[TabularEngine] Supabase storage download exception:`, storageErr?.message || storageErr);
+    }
+  }
+
+  if (!buffer) {
+    console.warn(`[TabularEngine] Could not retrieve file buffer for ${filename} (ID: ${docRecord.id})`);
+    return null;
+  }
+
+  try {
+    // 3. Parse buffer (uses PapaParse for CSV, XLSX for spreadsheets)
+    const parsed = parseTabularBuffer(buffer, filename);
+    if (!parsed || !parsed.rows || parsed.rows.length === 0) {
+      console.warn(`[TabularEngine] Parsed 0 records from: ${filename}`);
+      return null;
+    }
+
+    // 4. Deterministic profiling
+    const profile = profileTabularDataset(parsed.rows, parsed.headers, filename);
+
+    const datasetPayload = {
+      ...parsed,
+      ...profile,
+      documentId: docRecord.id,
+      filename: docRecord.filename,
+      file_url: docRecord.file_url,
+    };
+
+    // 5. Load into in-memory store
+    registerDataset(docRecord.id, datasetPayload);
+    console.log(`[TabularEngine] Successfully restored "${docRecord.filename}" (${parsed.totalRows} rows) into memory from Supabase.`);
+    return datasetPayload;
+  } catch (parseErr) {
+    console.error(`[TabularEngine] Error parsing tabular dataset from ${filename}:`, parseErr);
+    return null;
+  }
+}
+
+/**
+ * Retrieve registered dataset with fuzzy and multi-match support.
+ * If not present in memory, automatically fetches the document record from Supabase,
+ * downloads the file from Supabase storage, parses it with PapaParse, and loads it into memory.
+ */
+export async function getRegisteredDataset(identifier) {
+  // Step 1: Check in-memory store first (synchronous check)
+  if (identifier) {
+    const cached = getRegisteredDatasetSync(identifier);
+    if (cached) return cached;
+  } else {
+    const all = getAllRegisteredDatasets();
+    if (all.length > 0) return all[all.length - 1] || all[0];
+  }
+
+  // Step 2: Not in memory -> fetch from Supabase
+  try {
+    const supabase = getSupabaseClient();
+    if (!supabase) {
+      console.warn('[TabularEngine] Supabase client is not available.');
+      return null;
+    }
+
+    let cleanId = '';
+    if (identifier) {
+      cleanId = String(identifier).trim();
+      // Remove any [Documents Attached (1): ...] prompt markup
+      const matchAttached = cleanId.match(/\[Documents?\s+Attached(?:\s*\(\d+\))?:\s*([^\]]+)\]/i);
+      if (matchAttached) {
+        cleanId = matchAttached[1].trim();
+      }
+    }
+
+    let candidateKeys = [];
+    if (cleanId) {
+      candidateKeys = cleanId
+        .split(/[,;\n]+/)
+        .map((p) => p.trim())
+        .filter(Boolean);
+      if (candidateKeys.length === 0) candidateKeys = [cleanId];
+    }
+
+    let docRecord = null;
+
+    for (const key of candidateKeys) {
+      // Check if key is a valid UUID
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(key);
+      if (isUuid) {
+        const { data, error } = await supabase
+          .from('documents')
+          .select('*')
+          .eq('id', key)
+          .order('created_at', { ascending: false })
+          .limit(1);
+        if (!error && data && data.length > 0) {
+          docRecord = data[0];
+          break;
+        }
+      }
+
+      // Try exact filename match
+      const { data: exactData, error: exactErr } = await supabase
+        .from('documents')
+        .select('*')
+        .eq('filename', key)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      if (!exactErr && exactData && exactData.length > 0) {
+        docRecord = exactData[0];
+        break;
+      }
+
+      // Try fuzzy / partial match
+      const baseKey = key.replace(/\.[^/.]+$/, '');
+      const { data: fuzzyData, error: fuzzyErr } = await supabase
+        .from('documents')
+        .select('*')
+        .ilike('filename', `%${baseKey}%`)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      if (!fuzzyErr && fuzzyData && fuzzyData.length > 0) {
+        docRecord = fuzzyData[0];
+        break;
+      }
+    }
+
+    // If identifier was omitted or no matching record was found, look for latest CSV / tabular document
+    if (!docRecord) {
+      const { data: latestData, error: latestErr } = await supabase
+        .from('documents')
+        .select('*')
+        .or('filename.ilike.%.csv,filename.ilike.%.xlsx,filename.ilike.%.xls')
+        .order('created_at', { ascending: false })
+        .limit(1);
+      if (!latestErr && latestData && latestData.length > 0) {
+        docRecord = latestData[0];
+      }
+    }
+
+    if (!docRecord) {
+      console.warn(`[TabularEngine] No tabular document found in Supabase for identifier: "${identifier || ''}"`);
+      return null;
+    }
+
+    console.log(`[TabularEngine] Recovering tabular dataset from Supabase: "${docRecord.filename}" (${docRecord.id})`);
+    return await fetchAndRegisterTabularDoc(docRecord);
+  } catch (err) {
+    console.error('[TabularEngine] Error recovering tabular dataset from Supabase:', err?.message || err);
+    return null;
+  }
 }
 
 /**
