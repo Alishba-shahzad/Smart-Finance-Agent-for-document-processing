@@ -1129,22 +1129,6 @@ export const getDatasetRecordsTool = tool({
       }
 
       if (!dataset) {
-        const activeDocs = getActiveSessionDocuments();
-        if (targetColumn && activeDocs.length > 1) {
-          for (const doc of activeDocs) {
-            const candidate = await getRegisteredDataset(doc);
-            if (candidate && Array.isArray(candidate.headers)) {
-              const col = resolveColumnHeader(candidate.headers, targetColumn);
-              if (col && candidate.headers.includes(col)) {
-                dataset = candidate;
-                break;
-              }
-            }
-          }
-        }
-      }
-
-      if (!dataset) {
         dataset = await getRegisteredDataset(getActiveSessionDocument());
       }
       if (!dataset) {
@@ -1441,17 +1425,131 @@ function getSimulatedFinancialResponse(prompt, activeTabularOrList) {
   );
 }
 
-function resolveGeminiModel() {
+function resolveGeminiCandidateModels() {
   const envModel = process.env.GEMINI_MODEL?.trim();
-  if (
+  const candidates = [
     envModel &&
     envModel !== 'gemini-2.0-flash' &&
     envModel !== 'gemini-2.5-flash' &&
     envModel !== 'gemini-1.5-flash'
-  ) {
-    return envModel;
+      ? envModel
+      : null,
+    'gemini-3.5-flash',
+    'gemini-3.8-flash',
+    'gemini-3-flash-preview',
+    'gemini-3.5-flash-lite',
+    'gemini-3.1-flash-lite',
+    'gemini-flash-latest',
+  ].filter(Boolean);
+
+  return Array.from(new Set(candidates));
+}
+
+/**
+ * Attempts to stream a Web Standard Response to Express.
+ * Buffers initial control frames until real content or a tool call arrives so that
+ * pre-content provider errors (e.g. 429 Quota Exceeded / 404 Model Not Found)
+ * can cleanly fall through to the next candidate Gemini model.
+ * Returns { streamed: true } if content was sent, or { streamed: false, error } if it failed before output.
+ */
+async function tryStreamWebResponseToExpress(webRes, expressRes, fallbackGenerator) {
+  if (!webRes.body) {
+    return { streamed: false, error: new Error('Empty response body from provider') };
   }
-  return 'gemini-3.5-flash';
+
+  const reader = webRes.body.getReader();
+  const decoder = new TextDecoder();
+  const bufferedChunks = [];
+  let committed = false;
+  let hasTextOutput = false;
+
+  const commitHeadersAndBuffer = () => {
+    if (committed) return;
+    committed = true;
+    if (!expressRes.headersSent) {
+      expressRes.status(webRes.status || 200);
+      webRes.headers.forEach((value, key) => {
+        expressRes.setHeader(key, value);
+      });
+    }
+    for (const chunk of bufferedChunks) {
+      expressRes.write(chunk);
+    }
+    bufferedChunks.length = 0;
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.length === 0) continue;
+
+      const chunkStr = decoder.decode(value, { stream: true });
+
+      if (chunkStr.includes('"type":"error"')) {
+        if (!committed) {
+          console.warn('[Stream Pump] Provider emitted error event before content:', chunkStr.trim());
+          try {
+            await reader.cancel();
+          } catch {}
+          return { streamed: false, error: new Error(chunkStr.trim()) };
+        }
+        // Committed mid-stream (e.g. after tool calls, hit token/min rate limit before text)
+        console.warn('[Stream Pump] Provider emitted mid-stream error event:', chunkStr.trim());
+        if (!hasTextOutput && typeof fallbackGenerator === 'function') {
+          try {
+            const fallbackText = fallbackGenerator();
+            const respId = `fb-${Date.now()}`;
+            expressRes.write(`data: {"type":"text-start","id":"${respId}"}\n\n`);
+            expressRes.write(`data: {"type":"text-delta","id":"${respId}","delta":${JSON.stringify(fallbackText)}}\n\n`);
+            expressRes.write(`data: {"type":"text-end","id":"${respId}"}\n\n`);
+            hasTextOutput = true;
+          } catch {}
+        }
+        continue;
+      }
+
+      if (chunkStr.includes('"type":"text-delta"') || chunkStr.includes('"type":"text-start"')) {
+        hasTextOutput = true;
+      }
+
+      if (
+        !committed &&
+        (chunkStr.includes('"type":"text-start"') ||
+          chunkStr.includes('"type":"text-delta"') ||
+          chunkStr.includes('"type":"tool-input-start"') ||
+          chunkStr.includes('"type":"tool-input-available"'))
+      ) {
+        commitHeadersAndBuffer();
+      }
+
+      if (committed) {
+        expressRes.write(value);
+      } else {
+        bufferedChunks.push(value);
+      }
+    }
+
+    if (!committed) {
+      return { streamed: false, error: new Error('Stream ended without producing content') };
+    }
+
+    try {
+      expressRes.write(`data: [DONE]\n\n`);
+    } catch {}
+    expressRes.end();
+    return { streamed: true };
+  } catch (streamErr) {
+    console.warn('[Stream Pump] Provider error during stream pumping:', streamErr?.message || streamErr);
+    if (committed) {
+      try {
+        expressRes.write(`data: [DONE]\n\n`);
+      } catch {}
+      expressRes.end();
+      return { streamed: true };
+    }
+    return { streamed: false, error: streamErr };
+  }
 }
 
 /**
@@ -1788,41 +1886,63 @@ Strictly base your calculations, summaries, and GenUI tables ONLY on the real da
         console.log(`[Sanitize] Sanitized history from ${rawMessages.length} raw messages to ${modelMessages.length} clean model messages`);
 
         const google = createGoogle({ apiKey });
-        const selectedModel = resolveGeminiModel();
-        console.log(`[RAG Chat] Streaming response with Gemini model: ${selectedModel}`);
+        const candidateModels = resolveGeminiCandidateModels();
+        let lastModelError = null;
 
-        const result = streamText({
-          model: google(selectedModel),
-          system: ragContextText,
-          messages: modelMessages,
-          stopWhen: isStepCount(5),
-          maxSteps: 5,
-          tools: {
-            render_financial_table: renderFinancialTableTool,
-            render_financial_chart: renderFinancialVisualizationTool,
-            render_financial_visualization: renderFinancialVisualizationTool,
-            calculate_financial_metrics: calculateFinancialMetricsTool,
-            query_tabular_dataset: queryTabularDatasetTool,
-            get_dataset_records: getDatasetRecordsTool,
-            cross_reference_documents: crossReferenceDocumentsTool,
-            join_datasets: joinDatasetsTool,
-          },
-        });
+        for (const selectedModel of candidateModels) {
+          try {
+            console.log(`[RAG Chat] Streaming response with Gemini model: ${selectedModel}`);
 
-        let webResponse;
-        if (typeof result.toUIMessageStreamResponse === 'function') {
-          webResponse = result.toUIMessageStreamResponse();
-        } else if (typeof result.toDataStreamResponse === 'function') {
-          webResponse = result.toDataStreamResponse();
-        } else {
-          webResponse = result.toTextStreamResponse();
+            const result = streamText({
+              model: google(selectedModel),
+              system: ragContextText,
+              messages: modelMessages,
+              maxRetries: 1,
+              stopWhen: isStepCount(6),
+              maxSteps: 6,
+              tools: {
+                render_financial_table: renderFinancialTableTool,
+                render_financial_chart: renderFinancialVisualizationTool,
+                render_financial_visualization: renderFinancialVisualizationTool,
+                calculate_financial_metrics: calculateFinancialMetricsTool,
+                query_tabular_dataset: queryTabularDatasetTool,
+                get_dataset_records: getDatasetRecordsTool,
+                cross_reference_documents: crossReferenceDocumentsTool,
+                join_datasets: joinDatasetsTool,
+              },
+            });
+
+            let webResponse;
+            if (typeof result.toUIMessageStreamResponse === 'function') {
+              webResponse = result.toUIMessageStreamResponse();
+            } else if (typeof result.toDataStreamResponse === 'function') {
+              webResponse = result.toDataStreamResponse();
+            } else {
+              webResponse = result.toTextStreamResponse();
+            }
+
+            const fallbackGenerator = () =>
+              getSimulatedFinancialResponse(userPromptText || 'Financial Overview', activeTabularList);
+
+            const streamAttempt = await tryStreamWebResponseToExpress(webResponse, res, fallbackGenerator);
+            if (streamAttempt.streamed) {
+              return;
+            }
+            lastModelError = streamAttempt.error;
+            console.warn(
+              `[RAG Chat] Model '${selectedModel}' failed before content, trying next candidate:`,
+              lastModelError?.message || lastModelError
+            );
+          } catch (modelErr) {
+            lastModelError = modelErr;
+            console.warn(
+              `[RAG Chat] Model '${selectedModel}' threw error, trying next candidate:`,
+              modelErr?.message || modelErr
+            );
+          }
         }
 
-        const fallbackGenerator = () =>
-          getSimulatedFinancialResponse(userPromptText || 'Financial Overview', activeTabularList);
-
-        await pipeWebResponseToExpress(webResponse, res, fallbackGenerator);
-        return;
+        throw lastModelError || new Error('All candidate Gemini models failed');
       } catch (geminiError) {
         console.warn('Gemini stream initialization/pipeline failed, falling back to simulated stream:', geminiError?.message || geminiError);
       }
