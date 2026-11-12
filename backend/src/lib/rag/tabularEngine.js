@@ -469,8 +469,22 @@ export async function fetchAndRegisterTabularDoc(docRecord) {
   }
 
   try {
-    // 3. Parse buffer (uses PapaParse for CSV, XLSX for spreadsheets)
-    const parsed = parseTabularBuffer(buffer, filename);
+    // 3. Parse buffer (uses PapaParse for CSV, XLSX for spreadsheets, and multimodal/layout parser for PDFs)
+    const lowerName = filename.toLowerCase();
+    let parsed = null;
+
+    if (lowerName.endsWith('.pdf')) {
+      try {
+        const { extractTextFromPdf, parseTabularFromExtractedText } = await import('./ingestion.js');
+        const text = await extractTextFromPdf(buffer, { filename });
+        parsed = parseTabularFromExtractedText(text, filename);
+      } catch (pdfErr) {
+        console.warn(`[TabularEngine] Could not parse tabular data from PDF "${filename}":`, pdfErr?.message || pdfErr);
+      }
+    } else {
+      parsed = parseTabularBuffer(buffer, filename);
+    }
+
     if (!parsed || !parsed.rows || parsed.rows.length === 0) {
       console.warn(`[TabularEngine] Parsed 0 records from: ${filename}`);
       return null;
@@ -717,5 +731,262 @@ export function queryTabularData(dataset, options = {}) {
     rows: slicedRows,
     records: slicedRows, // Parsed JSON array passed directly
     subtotals,
+  };
+}
+
+/**
+ * Retrieve multiple registered datasets simultaneously
+ */
+export async function getMultipleRegisteredDatasets(identifiers) {
+  if (!Array.isArray(identifiers) || identifiers.length === 0) {
+    return getAllRegisteredDatasets();
+  }
+
+  const datasets = [];
+  const seen = new Set();
+
+  for (const id of identifiers) {
+    if (!id) continue;
+    const ds = await getRegisteredDataset(id);
+    if (ds && !seen.has(ds.filename || ds.documentId)) {
+      seen.add(ds.filename || ds.documentId);
+      datasets.push(ds);
+    }
+  }
+
+  return datasets;
+}
+
+/**
+ * Detect common identifier / foreign key fields between two datasets (e.g. vendor_id, customer_id)
+ */
+export function findCommonJoinKeys(headers1, headers2) {
+  if (!Array.isArray(headers1) || !Array.isArray(headers2)) return [];
+
+  const common = [];
+  const h2LowerMap = new Map();
+  for (const h of headers2) {
+    h2LowerMap.set(h.toLowerCase(), h);
+    h2LowerMap.set(h.toLowerCase().replace(/[^a-z0-9]/g, ''), h);
+  }
+
+  const idPatterns = [
+    /^(?:vendor|supplier|seller)[_\s]*(?:id|code|no|num|number)?$/i,
+    /^(?:customer|client|buyer|account)[_\s]*(?:id|code|no|num|number)?$/i,
+    /^(?:invoice|bill|statement)[_\s]*(?:id|code|no|num|number)?$/i,
+    /^(?:order|po|purchase_order|item)[_\s]*(?:id|code|no|num|number)?$/i,
+    /^(?:symbol|ticker|code|id|key)$/i,
+  ];
+
+  // 1. Direct or normalized name match
+  for (const h1 of headers1) {
+    const h1Lower = h1.toLowerCase();
+    const h1Clean = h1Lower.replace(/[^a-z0-9]/g, '');
+
+    if (h2LowerMap.has(h1Lower)) {
+      common.push({ key1: h1, key2: h2LowerMap.get(h1Lower), confidence: 1.0 });
+    } else if (h2LowerMap.has(h1Clean)) {
+      common.push({ key1: h1, key2: h2LowerMap.get(h1Clean), confidence: 0.9 });
+    }
+  }
+
+  // 2. Pattern-based alias matching
+  if (common.length === 0) {
+    for (const pattern of idPatterns) {
+      const match1 = headers1.find((h) => pattern.test(h));
+      const match2 = headers2.find((h) => pattern.test(h));
+      if (match1 && match2) {
+        common.push({ key1: match1, key2: match2, confidence: 0.85 });
+      }
+    }
+  }
+
+  // 3. Fallback: match any column containing 'id' or 'code' or 'no'
+  if (common.length === 0) {
+    const idCols1 = headers1.filter((h) => /id|code|num|no/i.test(h));
+    const idCols2 = headers2.filter((h) => /id|code|num|no/i.test(h));
+    for (const col1 of idCols1) {
+      const c1Base = col1.toLowerCase().replace(/id|code|num|no|[^a-z]/gi, '');
+      if (!c1Base) continue;
+      const col2 = idCols2.find((c) => c.toLowerCase().includes(c1Base));
+      if (col2) {
+        common.push({ key1: col1, key2: col2, confidence: 0.7 });
+      }
+    }
+  }
+
+  return common;
+}
+
+/**
+ * Performs deterministic SQL-like joins (INNER, LEFT, RIGHT, FULL) between two tabular datasets
+ */
+export function joinTabularDatasets(ds1, ds2, options = {}) {
+  if (!ds1 || !ds2 || !Array.isArray(ds1.rows) || !Array.isArray(ds2.rows)) {
+    return {
+      success: false,
+      message: 'Both datasets must be valid and contain row arrays.',
+      joinedRows: [],
+      joinedHeaders: [],
+      matchSummary: {},
+    };
+  }
+
+  const joinType = (options.joinType || 'inner').toLowerCase();
+  let key1 = options.key1;
+  let key2 = options.key2;
+
+  // Auto-detect common join keys if not specified
+  if (!key1 || !key2) {
+    const commonKeys = findCommonJoinKeys(ds1.headers, ds2.headers);
+    if (commonKeys.length > 0) {
+      key1 = commonKeys[0].key1;
+      key2 = commonKeys[0].key2;
+    } else {
+      key1 = ds1.headers[0];
+      key2 = ds2.headers[0];
+    }
+  }
+
+  const name1 = (ds1.filename || 'table1').replace(/\.[^/.]+$/, '');
+  const name2 = (ds2.filename || 'table2').replace(/\.[^/.]+$/, '');
+
+  // Index ds2 by normalized key2 values
+  const ds2Map = new Map();
+  for (const r2 of ds2.rows) {
+    if (!r2 || typeof r2 !== 'object') continue;
+    const rawVal = r2[key2];
+    if (rawVal === undefined || rawVal === null) continue;
+    const normKey = String(rawVal).trim().toLowerCase();
+    if (!normKey) continue;
+
+    if (!ds2Map.has(normKey)) {
+      ds2Map.set(normKey, []);
+    }
+    ds2Map.get(normKey).push(r2);
+  }
+
+  const joinedRows = [];
+  const matchedKeySet = new Set();
+  const ds1MatchedKeys = new Set();
+  const discrepancies = [];
+
+  // Helper to merge rows with prefixing if column names collide
+  const mergeRows = (r1, r2, kVal) => {
+    const merged = {};
+    if (kVal !== undefined) {
+      merged['_join_key'] = kVal;
+    }
+
+    if (r1) {
+      for (const [col, val] of Object.entries(r1)) {
+        if (r2 && r2.hasOwnProperty(col) && col !== key1 && col !== key2) {
+          merged[`${name1}_${col}`] = val;
+        } else {
+          merged[col] = val;
+        }
+      }
+    }
+
+    if (r2) {
+      for (const [col, val] of Object.entries(r2)) {
+        if (r1 && r1.hasOwnProperty(col) && col !== key1 && col !== key2) {
+          merged[`${name2}_${col}`] = val;
+        } else if (!merged.hasOwnProperty(col)) {
+          merged[col] = val;
+        }
+      }
+    }
+
+    // Check for numerical variances between identically named or specified comparison columns
+    if (r1 && r2 && Array.isArray(options.comparisonFields)) {
+      for (const f of options.comparisonFields) {
+        const v1 = r1[f];
+        const v2 = r2[f];
+        const n1 = parseFinancialNumber(v1);
+        const n2 = parseFinancialNumber(v2);
+        if (n1 !== null && n2 !== null && Math.abs(n1 - n2) > 0.01) {
+          discrepancies.push({
+            joinKey: kVal,
+            field: f,
+            [name1]: v1,
+            [name2]: v2,
+            variance: formatCurrency(n1 - n2),
+            varianceRaw: n1 - n2,
+          });
+        }
+      }
+    }
+
+    return merged;
+  };
+
+  // Iterate ds1 rows
+  for (const r1 of ds1.rows) {
+    if (!r1 || typeof r1 !== 'object') continue;
+    const rawVal1 = r1[key1];
+    const normKey1 = rawVal1 !== undefined && rawVal1 !== null ? String(rawVal1).trim().toLowerCase() : '';
+
+    const matchingR2List = normKey1 ? ds2Map.get(normKey1) : null;
+
+    if (matchingR2List && matchingR2List.length > 0) {
+      ds1MatchedKeys.add(normKey1);
+      matchedKeySet.add(normKey1);
+      for (const r2 of matchingR2List) {
+        joinedRows.push(mergeRows(r1, r2, rawVal1));
+      }
+    } else {
+      if (joinType === 'left' || joinType === 'full') {
+        joinedRows.push(mergeRows(r1, null, rawVal1));
+      }
+    }
+  }
+
+  // For RIGHT or FULL outer joins, add rows from ds2 that did not match ds1
+  if (joinType === 'right' || joinType === 'full') {
+    for (const r2 of ds2.rows) {
+      if (!r2 || typeof r2 !== 'object') continue;
+      const rawVal2 = r2[key2];
+      const normKey2 = rawVal2 !== undefined && rawVal2 !== null ? String(rawVal2).trim().toLowerCase() : '';
+      if (!normKey2 || !ds1MatchedKeys.has(normKey2)) {
+        joinedRows.push(mergeRows(null, r2, rawVal2));
+      }
+    }
+  }
+
+  const headerSet = new Set();
+  const joinedHeaders = [];
+  for (const r of joinedRows) {
+    for (const k of Object.keys(r)) {
+      if (!headerSet.has(k)) {
+        headerSet.add(k);
+        joinedHeaders.push(k);
+      }
+    }
+  }
+
+  const matchSummary = {
+    primaryDataset: ds1.filename || 'dataset_1',
+    primaryTotalRows: ds1.rows.length,
+    secondaryDataset: ds2.filename || 'dataset_2',
+    secondaryTotalRows: ds2.rows.length,
+    joinType: joinType.toUpperCase(),
+    joinKeys: { key1, key2 },
+    matchedDistinctKeysCount: matchedKeySet.size,
+    totalJoinedRows: joinedRows.length,
+    unmatchedPrimaryCount: ds1.rows.length - ds1MatchedKeys.size,
+    unmatchedSecondaryCount: ds2.rows.length - matchedKeySet.size,
+    discrepancyCount: discrepancies.length,
+  };
+
+  return {
+    success: true,
+    joinType: joinType.toUpperCase(),
+    key1,
+    key2,
+    matchSummary,
+    joinedHeaders,
+    joinedRows,
+    discrepancies: discrepancies.slice(0, 50),
   };
 }

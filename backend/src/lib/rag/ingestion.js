@@ -457,6 +457,161 @@ export async function extractTextFromPdf(buffer, options = {}) {
 export const extractInvoiceContentFromPdf = extractTextFromPdf;
 
 /**
+ * Parse Markdown tables and key-value invoice entities from extracted text into tabular records
+ */
+export function parseTabularFromExtractedText(text, filename = 'document.pdf') {
+  if (!text || typeof text !== 'string') return null;
+
+  const lines = text.split('\n');
+  const tableBlocks = [];
+  let currentBlock = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.includes('|')) {
+      if (!currentBlock) {
+        currentBlock = [];
+      }
+      currentBlock.push(trimmed);
+    } else {
+      if (currentBlock && currentBlock.length >= 2) {
+        tableBlocks.push(currentBlock);
+      }
+      currentBlock = null;
+    }
+  }
+  if (currentBlock && currentBlock.length >= 2) {
+    tableBlocks.push(currentBlock);
+  }
+
+  // Extract top-level invoice entity metadata to enrich table rows
+  let invoiceId = '';
+  let vendorName = '';
+  let customerName = '';
+  let invoiceDate = '';
+  let totalAmount = null;
+
+  for (const line of lines) {
+    const l = line.trim();
+    const invMatch = l.match(/\b(?:invoice\s*(?:#|no\.?|number|id)?|inv\s*#?)\s*[:*#\-]+\s*([a-zA-Z0-9_\-]+)/i);
+    if (invMatch && !invoiceId) {
+      const candidate = invMatch[1].trim();
+      if (!/^(?:metadata|details|summary|information|table|section|notes|items?)$/i.test(candidate)) {
+        invoiceId = candidate;
+      }
+    }
+
+    const vendorMatch = l.match(/(?:vendor|issuer|from|supplier|company)\s*[:*#-]*\s*([^\n*]+)/i);
+    if (vendorMatch && !vendorName) vendorName = vendorMatch[1].replace(/[*_#]/g, '').trim();
+
+    const custMatch = l.match(/(?:bill\s*to|client|customer|recipient|ship\s*to)\s*[:*#-]*\s*([^\n*]+)/i);
+    if (custMatch && !customerName) customerName = custMatch[1].replace(/[*_#]/g, '').trim();
+
+    const dateMatch = l.match(/(?:invoice\s*date|date|dated)\s*[:*#-]*\s*(\d{4}[-/.]\d{2}[-/.]\d{2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4})/i);
+    if (dateMatch && !invoiceDate) invoiceDate = dateMatch[1].trim();
+
+    const totalMatch = l.match(/(?:total\s*(?:amount(?:\s*due)?)?|amount\s*due|balance\s*due)\s*[:*#-]*\s*([$€£]?\s*[\d,]+(?:\.\d{2})?)/i);
+    if (totalMatch && totalAmount === null) {
+      const num = parseFloat(totalMatch[1].replace(/[^0-9.-]/g, ''));
+      if (!isNaN(num)) totalAmount = num;
+    }
+  }
+
+  // Parse each detected markdown table block
+  for (const block of tableBlocks) {
+    if (block.length < 2) continue;
+    const headerLine = block[0];
+    const dividerLine = block[1];
+    if (!dividerLine.includes('---')) continue;
+
+    const rawHeaders = headerLine
+      .split('|')
+      .slice(1, -1)
+      .map((h) => h.replace(/[*_`]/g, '').trim())
+      .filter((h) => h.length > 0);
+
+    if (rawHeaders.length === 0) continue;
+
+    const rows = [];
+    for (let r = 2; r < block.length; r++) {
+      const rowLine = block[r];
+      if (rowLine.includes('---')) continue;
+
+      const cells = rowLine.split('|').slice(1, -1).map((c) => c.replace(/[*_`]/g, '').trim());
+      if (cells.length === 0 || cells.every((c) => c === '')) continue;
+
+      const rowObj = {};
+      for (let h = 0; h < rawHeaders.length; h++) {
+        rowObj[rawHeaders[h]] = cells[h] !== undefined ? cells[h] : '';
+      }
+
+      // Enrich row with invoice identifiers for cross-file joins
+      if (invoiceId && !rowObj['invoice_id'] && !rowObj['Invoice #']) {
+        rowObj['invoice_id'] = invoiceId;
+      }
+      if (vendorName && !rowObj['vendor_id'] && !rowObj['Vendor']) {
+        rowObj['vendor_id'] = vendorName;
+      }
+      if (customerName && !rowObj['customer_id'] && !rowObj['Customer']) {
+        rowObj['customer_id'] = customerName;
+      }
+
+      rows.push(rowObj);
+    }
+
+    if (rows.length > 0) {
+      const allHeaders = Array.from(
+        new Set([
+          ...rawHeaders,
+          ...(invoiceId ? ['invoice_id'] : []),
+          ...(vendorName ? ['vendor_id'] : []),
+          ...(customerName ? ['customer_id'] : []),
+        ])
+      );
+      return {
+        headers: allHeaders,
+        rows,
+        totalRows: rows.length,
+        invoiceMetadata: {
+          invoiceId,
+          vendorName,
+          customerName,
+          invoiceDate,
+          totalAmount,
+        },
+      };
+    }
+  }
+
+  // If no multi-row table was detected, but we found an invoice entity with an amount
+  if (invoiceId || vendorName || totalAmount !== null) {
+    const singleRow = {
+      invoice_id: invoiceId || filename.replace(/\.[^/.]+$/, ''),
+      vendor_id: vendorName || 'Vendor',
+      customer_id: customerName || 'Client',
+      date: invoiceDate || new Date().toISOString().split('T')[0],
+      total_amount: totalAmount !== null ? totalAmount : 0,
+      filename,
+    };
+    const headers = Object.keys(singleRow);
+    return {
+      headers,
+      rows: [singleRow],
+      totalRows: 1,
+      invoiceMetadata: {
+        invoiceId,
+        vendorName,
+        customerName,
+        invoiceDate,
+        totalAmount,
+      },
+    };
+  }
+
+  return null;
+}
+
+/**
  * Chunk raw document text into meaningful, context-preserving segments,
  * maintaining tabular invoice row integrity and re-attaching table headers if tables are split.
  */
@@ -735,6 +890,36 @@ export async function processDocumentRAG(documentId) {
         extractedText = await extractTextFromPdf(buffer, {
           filename: doc.filename,
         });
+
+        // Register any tabular invoice structures extracted from the PDF into TabularEngine
+        try {
+          const parsedTabular = parseTabularFromExtractedText(extractedText, doc.filename);
+          if (parsedTabular && parsedTabular.rows && parsedTabular.rows.length > 0) {
+            const profile = profileTabularDataset(
+              parsedTabular.rows,
+              parsedTabular.headers,
+              doc.filename
+            );
+            const datasetPayload = {
+              ...parsedTabular,
+              ...profile,
+              documentId,
+              filename: doc.filename,
+              file_url: doc.file_url,
+              isFromPdf: true,
+            };
+            registerDataset(documentId, datasetPayload);
+            registerDataset(doc.filename, datasetPayload);
+            console.log(
+              `[TabularEngine] Successfully registered ${parsedTabular.rows.length} tabular records from PDF "${doc.filename}" into Tabular Engine.`
+            );
+          }
+        } catch (tabErr) {
+          console.warn(
+            `[PDF Ingestion] Could not register tabular dataset from PDF text:`,
+            tabErr?.message || tabErr
+          );
+        }
       } else {
         extractedText = buffer.toString('utf-8');
       }

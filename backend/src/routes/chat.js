@@ -18,6 +18,9 @@ import {
   queryTabularData,
   getRegisteredDataset,
   getAllRegisteredDatasets,
+  getMultipleRegisteredDatasets,
+  findCommonJoinKeys,
+  joinTabularDatasets,
   parseFinancialNumber,
   formatCurrency,
   formatNumber,
@@ -26,16 +29,33 @@ import {
 
 const router = Router();
 
-let sessionActiveDocument = null;
+let sessionActiveDocuments = [];
 let globalCurrentPrompt = '';
 
+export function getActiveSessionDocuments() {
+  return [...sessionActiveDocuments];
+}
+
 export function getActiveSessionDocument() {
-  return sessionActiveDocument;
+  return sessionActiveDocuments[0] || null;
+}
+
+export function setActiveSessionDocuments(docNames) {
+  if (Array.isArray(docNames)) {
+    sessionActiveDocuments = docNames
+      .map((d) => (typeof d === 'string' ? d.trim() : ''))
+      .filter(Boolean);
+  } else if (typeof docNames === 'string' && docNames.trim()) {
+    sessionActiveDocuments = docNames
+      .split(/[,;\n]+/)
+      .map((d) => d.trim())
+      .filter(Boolean);
+  }
 }
 
 export function setActiveSessionDocument(docName) {
-  if (docName && typeof docName === 'string') {
-    sessionActiveDocument = docName.trim();
+  if (docName) {
+    setActiveSessionDocuments(docName);
   }
 }
 
@@ -267,11 +287,12 @@ export function sanitizeModelMessages(modelMessages) {
 const FINANCIAL_ANALYST_SYSTEM_PROMPT = `You are a Senior Banking Financial Analyst & Forensic Accounting Intelligence Specialist at a tier-one global financial institution. You analyze loan portfolios, commercial invoices, corporate filings (SEC 10-K, 10-Q), balance sheets, cash flows, and large tabular datasets (10,000+ rows).
 
 CRITICAL MANDATORY WORKFLOW DIRECTIVES (ZERO TOLERANCE FOR HALLUCINATION):
-0. ACTIVE CONTEXT CONTINUITY DIRECTIVE:
-   - Always operate strictly on the active document identified in the prompt header ([Documents Attached: ...] or [Active Document Context: ...]).
-   - For follow-up queries where the user does not attach a new file, maintain continuity with the previously attached active document.
+0. ACTIVE CONTEXT & MULTI-FILE CONTINUITY DIRECTIVE:
+   - Always operate strictly on the active document(s) identified in the prompt header ([Documents Attached: ...] or [Active Document Context: ...]).
+   - When multiple files are attached or active (e.g. multiple CSVs or a mix of CSV and PDF files), maintain awareness and access to ALL active files simultaneously.
+   - For follow-up queries where the user does not attach a new file, maintain continuity with the previously attached active document(s).
    - NEVER introduce or hallucinate arbitrary datasets like 'train.csv'.
-   - When the user requests a chart (e.g. Bar chart or Pie chart), strictly honor the requested chartType and map the exact column names from the active dataset (e.g. 'Market Cap', 'Sector', 'Price/Earnings') rather than dummy or default columns.
+   - When the user requests a chart (e.g. Bar chart or Pie chart), strictly honor the requested chartType and map the exact column names from the active dataset(s) rather than dummy or default columns.
 
 1. MANDATORY CALCULATION PRE-REQUISITE:
    - For ANY question asking about totals, sums, market caps, P/E ratios, averages, minimums, maximums, loan performance, or statistics across the dataset:
@@ -289,7 +310,7 @@ CRITICAL MANDATORY WORKFLOW DIRECTIVES (ZERO TOLERANCE FOR HALLUCINATION):
    - NEVER emit the raw tag '<!-- GENUI:BAR_CHART -->'. Always use the tool 'render_financial_visualization'.
 
 3. CRITICAL MULTI-STEP RESPONSE DIRECTIVE (MANDATORY TEXT GENERATION AFTER TOOL EXECUTION):
-   - Calling tools ('calculate_financial_metrics', 'render_financial_visualization', 'render_financial_table') is Step 1 of your workflow.
+   - Calling tools ('calculate_financial_metrics', 'render_financial_visualization', 'render_financial_table', 'join_datasets', 'cross_reference_documents') is Step 1 of your workflow.
    - You MUST NOT STOP after calling a tool.
    - Once the tool returns its calculated JSON data in Step 2, you MUST IMMEDIATELY proceed to generate a full, executive, audit-grade textual response.
    - In this textual response:
@@ -297,6 +318,17 @@ CRITICAL MANDATORY WORKFLOW DIRECTIVES (ZERO TOLERANCE FOR HALLUCINATION):
      * Render an interactive Markdown comparison/summary table displaying the calculated values.
      * Deliver executive analysis, risk breakdown, and actionable commentary.
    - Under NO circumstances may you terminate the turn without writing the narrative text and quantitative summary tables.
+
+4. MANDATORY MULTI-FILE COMPARATIVE & SQL-LIKE JOIN DIRECTIVE:
+   - When multiple files are attached or active in context (e.g. two CSV files like 'customers.csv' and 'orders.csv', or a mix of CSV and PDF files like 'vendor_master.csv' and 'commercial_invoice.pdf'):
+   - You MUST perform SQL-like relational joins across the datasets using common entity identifiers (e.g. 'vendor_id', 'customer_id', 'invoice_id', 'account_no', 'client_id', 'order_id', 'symbol', or case-insensitive matching ID fields).
+   - You can call 'join_datasets' or 'cross_reference_documents' to deterministically execute inner joins, left joins, or full outer joins across the files.
+   - Relational Reconciliation & Discrepancy Analysis:
+     * Match entities by ID across all active files.
+     * Identify missing records (e.g. customers in customers.csv with zero transactions in orders.csv, or vendor invoices lacking a corresponding purchase order).
+     * Calculate reconciliation variances between files (e.g. invoiced amount in invoice.pdf vs recorded amount in ledger.csv).
+     * Compute cross-file aggregations (e.g. total spending per vendor_id, average transaction volume per customer_id).
+   - In your written response, present a structured comparison table using 'render_financial_table' or Markdown tables, clearly labeling source files in column headers (e.g. | Vendor ID | Vendor Name (vendors.csv) | Invoiced Amount (invoice.pdf) | Paid Amount (ledger.csv) | Variance |).
 
 Professional Persona & Standards:
 1. Executive Text-First Analysis:
@@ -774,7 +806,30 @@ export const calculateFinancialMetricsTool = tool({
   }),
   execute: async ({ documentIdentifier, targetColumn, operation = 'sum', groupByColumn }) => {
     try {
-      let dataset = await getRegisteredDataset(documentIdentifier || getActiveSessionDocument());
+      let dataset = null;
+      if (documentIdentifier) {
+        dataset = await getRegisteredDataset(documentIdentifier);
+      }
+
+      if (!dataset) {
+        const activeDocs = getActiveSessionDocuments();
+        if (targetColumn && activeDocs.length > 1) {
+          for (const doc of activeDocs) {
+            const candidate = await getRegisteredDataset(doc);
+            if (candidate && Array.isArray(candidate.headers)) {
+              const col = resolveColumnHeader(candidate.headers, targetColumn);
+              if (col && candidate.headers.includes(col)) {
+                dataset = candidate;
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      if (!dataset) {
+        dataset = await getRegisteredDataset(getActiveSessionDocument());
+      }
       if (!dataset) {
         const all = getAllRegisteredDatasets();
         if (all.length > 0) dataset = all[all.length - 1] || all[0];
@@ -1068,7 +1123,30 @@ export const getDatasetRecordsTool = tool({
   }),
   execute: async ({ documentIdentifier, limit = 20, offset = 0 }) => {
     try {
-      let dataset = await getRegisteredDataset(documentIdentifier || getActiveSessionDocument());
+      let dataset = null;
+      if (documentIdentifier) {
+        dataset = await getRegisteredDataset(documentIdentifier);
+      }
+
+      if (!dataset) {
+        const activeDocs = getActiveSessionDocuments();
+        if (targetColumn && activeDocs.length > 1) {
+          for (const doc of activeDocs) {
+            const candidate = await getRegisteredDataset(doc);
+            if (candidate && Array.isArray(candidate.headers)) {
+              const col = resolveColumnHeader(candidate.headers, targetColumn);
+              if (col && candidate.headers.includes(col)) {
+                dataset = candidate;
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      if (!dataset) {
+        dataset = await getRegisteredDataset(getActiveSessionDocument());
+      }
       if (!dataset) {
         const all = getAllRegisteredDatasets();
         if (all.length > 0) dataset = all[all.length - 1] || all[0];
@@ -1121,8 +1199,8 @@ export const crossReferenceDocumentsTool = tool({
   parameters: z.object({
     primaryDocument: z.string().describe('Filename or identifier of the first document'),
     secondaryDocument: z.string().describe('Filename or identifier of the second document'),
-    reconciliationKey: z.string().describe('Shared key field to match records across documents (e.g. "invoice_id", "account_no", "borrower_id")'),
-    comparisonFields: z.array(z.string()).describe('List of numeric or text fields to reconcile (e.g. ["amount", "balance", "status"])'),
+    reconciliationKey: z.string().optional().describe('Shared key field to match records across documents (e.g. "invoice_id", "account_no", "vendor_id", "customer_id")'),
+    comparisonFields: z.array(z.string()).optional().describe('List of numeric or text fields to reconcile (e.g. ["amount", "balance", "status", "total"])'),
   }),
   execute: async ({ primaryDocument, secondaryDocument, reconciliationKey, comparisonFields }) => {
     try {
@@ -1136,59 +1214,21 @@ export const crossReferenceDocumentsTool = tool({
         };
       }
 
-      const ds1Map = new Map();
-      for (const r of ds1.rows) {
-        if (!r || typeof r !== 'object') continue;
-        const k = String(r[reconciliationKey] || '').trim().toLowerCase();
-        if (k) ds1Map.set(k, r);
-      }
-
-      const discrepancies = [];
-      let matchedCount = 0;
-
-      for (const r2 of ds2.rows) {
-        if (!r2 || typeof r2 !== 'object') continue;
-        const k = String(r2[reconciliationKey] || '').trim().toLowerCase();
-        if (!k) continue;
-
-        const r1 = ds1Map.get(k);
-        if (r1) {
-          matchedCount++;
-          for (const field of comparisonFields) {
-            const v1 = r1[field];
-            const v2 = r2[field];
-            const num1 = parseFinancialNumber(v1);
-            const num2 = parseFinancialNumber(v2);
-
-            if (num1 !== null && num2 !== null) {
-              const variance = num1 - num2;
-              if (Math.abs(variance) > 0.01) {
-                discrepancies.push({
-                  key: k,
-                  field,
-                  doc1Value: v1,
-                  doc2Value: v2,
-                  variance: formatCurrency(variance),
-                });
-              }
-            } else if (String(v1).trim().toLowerCase() !== String(v2).trim().toLowerCase()) {
-              discrepancies.push({
-                key: k,
-                field,
-                doc1Value: v1,
-                doc2Value: v2,
-                variance: 'Value mismatch',
-              });
-            }
-          }
-        }
-      }
+      const joinResult = joinTabularDatasets(ds1, ds2, {
+        joinType: 'inner',
+        key1: reconciliationKey,
+        key2: reconciliationKey,
+        comparisonFields,
+      });
 
       return {
         success: true,
-        matchedRecordsCount: matchedCount,
-        discrepancyCount: discrepancies.length,
-        auditSample: discrepancies.slice(0, 15),
+        matchedRecordsCount: joinResult.matchSummary.matchedDistinctKeysCount,
+        totalJoinedRows: joinResult.joinedRows.length,
+        discrepancyCount: joinResult.discrepancies.length,
+        auditSample: joinResult.discrepancies.slice(0, 15),
+        joinedSample: joinResult.joinedRows.slice(0, 15),
+        matchSummary: joinResult.matchSummary,
       };
     } catch (crossErr) {
       console.error('[crossReferenceDocumentsTool] Error:', crossErr?.message || crossErr);
@@ -1201,8 +1241,122 @@ export const crossReferenceDocumentsTool = tool({
   },
 });
 
-function getSimulatedFinancialResponse(prompt, activeTabular) {
+/**
+ * Tool: SQL-like relational join across multiple datasets
+ */
+export const joinDatasetsTool = tool({
+  description:
+    'Executes a deterministic SQL-like relational join (INNER, LEFT, RIGHT, FULL) between two active tabular datasets using common ID keys (e.g. vendor_id, customer_id, invoice_id, account_no). Returns merged records, match statistics, and reconciliation variances.',
+  parameters: z.object({
+    primaryDocument: z.string().describe('Filename or ID of the first/primary dataset (e.g. "customers.csv" or "vendors.csv")'),
+    secondaryDocument: z.string().describe('Filename or ID of the second/secondary dataset (e.g. "orders.csv" or "invoices.csv")'),
+    joinKey: z.string().optional().describe('Shared foreign key column name to join on (e.g. "vendor_id", "customer_id", "invoice_id"). If omitted, will be auto-detected.'),
+    secondaryJoinKey: z.string().optional().describe('Optional key column in second dataset if names differ (e.g. "vendor_code" matching "vendor_id")'),
+    joinType: z.enum(['inner', 'left', 'right', 'full']).optional().default('inner').describe('SQL join type: "inner", "left", "right", or "full" (default "inner")'),
+    comparisonFields: z.array(z.string()).optional().describe('List of numeric fields to compare and calculate variances between the joined records (e.g. ["amount", "balance", "total"])'),
+    limit: z.number().optional().default(20).describe('Max number of joined records to return (1 to 50)'),
+  }),
+  execute: async ({
+    primaryDocument,
+    secondaryDocument,
+    joinKey,
+    secondaryJoinKey,
+    joinType = 'inner',
+    comparisonFields,
+    limit = 20,
+  }) => {
+    try {
+      const ds1 = await getRegisteredDataset(primaryDocument);
+      const ds2 = await getRegisteredDataset(secondaryDocument);
+
+      if (!ds1 || !ds2) {
+        return {
+          success: false,
+          message: `Both datasets must be active in session. Found: ${primaryDocument}: ${Boolean(ds1)}, ${secondaryDocument}: ${Boolean(ds2)}. Data was not received.`,
+        };
+      }
+
+      const joinResult = joinTabularDatasets(ds1, ds2, {
+        joinType,
+        key1: joinKey,
+        key2: secondaryJoinKey || joinKey,
+        comparisonFields,
+      });
+
+      const safeLimit = Math.min(Math.max(limit || 20, 1), 50);
+
+      return {
+        success: true,
+        joinType: joinResult.joinType,
+        joinKey: joinResult.key1,
+        secondaryJoinKey: joinResult.key2,
+        matchSummary: joinResult.matchSummary,
+        joinedHeaders: joinResult.joinedHeaders,
+        totalJoinedRows: joinResult.joinedRows.length,
+        joinedRecords: joinResult.joinedRows.slice(0, safeLimit),
+        discrepancies: joinResult.discrepancies,
+        message: `Successfully executed ${joinResult.joinType} join between "${ds1.filename}" and "${ds2.filename}" on ${joinResult.key1}. Matched ${joinResult.matchSummary.matchedDistinctKeysCount} distinct entities.`,
+      };
+    } catch (joinErr) {
+      console.error('[joinDatasetsTool] Error executing SQL join:', joinErr?.message || joinErr);
+      return {
+        success: false,
+        error: joinErr?.message || 'Join execution error',
+        message: `Join execution error: ${joinErr?.message || joinErr}`,
+      };
+    }
+  },
+});
+
+function getSimulatedFinancialResponse(prompt, activeTabularOrList) {
   const lower = (prompt || '').toLowerCase();
+  const datasets = Array.isArray(activeTabularOrList)
+    ? activeTabularOrList.filter(Boolean)
+    : activeTabularOrList
+    ? [activeTabularOrList]
+    : [];
+
+  // Multi-File Comparative Simulated Audit
+  if (datasets.length > 1) {
+    const ds1 = datasets[0];
+    const ds2 = datasets[1];
+    const commonKeys = findCommonJoinKeys(ds1.headers, ds2.headers);
+    const bestKey1 = commonKeys.length > 0 ? commonKeys[0].key1 : ds1.headers[0];
+    const bestKey2 = commonKeys.length > 0 ? commonKeys[0].key2 : ds2.headers[0];
+
+    const joinResult = joinTabularDatasets(ds1, ds2, {
+      joinType: 'inner',
+      key1: bestKey1,
+      key2: bestKey2,
+    });
+
+    const sampleJoined = joinResult.joinedRows.slice(0, 8);
+    const visibleHeaders = joinResult.joinedHeaders.slice(0, 6);
+    const tableHeader = visibleHeaders.join(' | ');
+    const tableDivider = visibleHeaders.map(() => ':---').join(' | ');
+    const tableData = sampleJoined
+      .map((r) => visibleHeaders.map((h) => String(r[h] ?? '')).join(' | '))
+      .join('\n');
+
+    return (
+      `### Executive Multi-File Comparative Financial Audit\n\n` +
+      `A forensic relational analysis was completed across **${datasets.length} active documents**:\n` +
+      `- **Primary Dataset**: **${ds1.filename}** (${formatNumber(ds1.rows?.length || 0)} records, ${ds1.headers?.length || 0} columns)\n` +
+      `- **Secondary Dataset**: **${ds2.filename}** (${formatNumber(ds2.rows?.length || 0)} records, ${ds2.headers?.length || 0} columns)\n\n` +
+      `#### Relational SQL Join Reconciliation (${joinResult.joinType} JOIN on \`${bestKey1}\` / \`${bestKey2}\`)\n` +
+      `- **Matched Distinct Entities**: **${formatNumber(joinResult.matchSummary.matchedDistinctKeysCount)}**\n` +
+      `- **Total Combined Records**: **${formatNumber(joinResult.matchSummary.totalJoinedRows)}**\n` +
+      `- **Discrepancy / Variance Count**: **${formatNumber(joinResult.matchSummary.discrepancyCount)}**\n\n` +
+      `#### Combined Comparative Schedule\n` +
+      `| ${tableHeader} |\n| ${tableDivider} |\n${tableData}\n\n` +
+      `#### Cross-Document Audit Intelligence\n` +
+      `- All records have been deterministically mapped using relational IDs across active context files.\n` +
+      `- Discrepancies and variances reflect cross-file reconciled audit figures.\n\n` +
+      `*Multi-file relational join completed across verified backend dataframes. Zero dummy templates.*`
+    );
+  }
+
+  const activeTabular = datasets[0] || null;
 
   if (activeTabular && activeTabular.rows && activeTabular.rows.length > 0) {
     const totalRows = activeTabular.rows.length;
@@ -1428,11 +1582,11 @@ router.post('/', async (req, res) => {
     globalCurrentPrompt = userPromptText;
 
     // -------------------------------------------------------------
-    // SESSION MEMORY & ACTIVE DOCUMENT RESOLUTION:
-    // Scan backwards from newest to oldest message to find the most
-    // recently attached or active document in this conversation.
+    // SESSION MEMORY & MULTI-DOCUMENT RESOLUTION:
+    // Scan backwards from newest to oldest message to find ALL
+    // active and attached documents in this conversation session.
     // -------------------------------------------------------------
-    let detectedActiveDoc = null;
+    let detectedActiveDocs = [];
 
     for (let i = rawMessages.length - 1; i >= 0; i--) {
       const msg = rawMessages[i];
@@ -1446,63 +1600,80 @@ router.post('/', async (req, res) => {
         msgText = msg.content;
       }
 
-      // Check for [Documents Attached: ...] in newest message backwards
+      // Check for [Documents Attached: ...] or [Documents Attached (N): ...] in messages
       const attachedMatch = msgText.match(/\[Documents?\s+Attached(?:\s*\(\d+\))?:\s*([^\]\n]+)\]/i);
       if (attachedMatch) {
         const rawFiles = attachedMatch[1].split(/[,;\n]+/).map((f) => f.trim()).filter(Boolean);
-        if (rawFiles.length > 0) {
-          detectedActiveDoc = rawFiles[rawFiles.length - 1];
-          break;
+        for (const f of rawFiles) {
+          if (!detectedActiveDocs.includes(f)) {
+            detectedActiveDocs.push(f);
+          }
         }
+        if (detectedActiveDocs.length > 0) break;
       }
 
       // Check for [Active Document Context: ...] in follow-up queries
       const activeCtxMatch = msgText.match(/\[Active\s+Document(?:\s+Context)?:\s*([^\]\n]+)\]/i);
       if (activeCtxMatch) {
         const rawFiles = activeCtxMatch[1].split(/[,;\n]+/).map((f) => f.trim()).filter(Boolean);
-        if (rawFiles.length > 0) {
-          detectedActiveDoc = rawFiles[0];
+        for (const f of rawFiles) {
+          if (!detectedActiveDocs.includes(f)) {
+            detectedActiveDocs.push(f);
+          }
+        }
+        if (detectedActiveDocs.length > 0) break;
+      }
+
+      // Check for explicit mentions of multiple tabular/PDF documents in user query
+      if (msg.role === 'user') {
+        const allFileMentions = msgText.match(/[\w\-.]+\.(?:csv|xlsx|xls|pdf)/gi);
+        if (allFileMentions && allFileMentions.length >= 2) {
+          for (const fm of allFileMentions) {
+            if (!detectedActiveDocs.includes(fm)) {
+              detectedActiveDocs.push(fm);
+            }
+          }
           break;
         }
       }
-
-      // Check for explicit mention of a tabular or PDF document
-      const fileMention = msgText.match(/[\w\-.]+\.(?:csv|xlsx|xls|pdf)/i)?.[0];
-      if (fileMention && msg.role === 'user') {
-        detectedActiveDoc = fileMention;
-        break;
-      }
     }
 
-    if (detectedActiveDoc) {
-      setActiveSessionDocument(detectedActiveDoc);
+    if (detectedActiveDocs.length > 0) {
+      setActiveSessionDocuments(detectedActiveDocs);
     } else {
-      detectedActiveDoc = getActiveSessionDocument();
+      detectedActiveDocs = getActiveSessionDocuments();
     }
 
-    console.log(`[Session Memory] Active Document for query: "${detectedActiveDoc || 'None'}"`);
+    console.log(`[Session Memory] Active Document(s) for query: ${JSON.stringify(detectedActiveDocs)}`);
 
-    // Check if any tabular dataset matches active document or is registered in memory
-    const isTabularDoc = detectedActiveDoc && /\.(?:csv|xlsx|xls)$/i.test(detectedActiveDoc);
+    // Load all active tabular datasets into memory simultaneously
+    const activeTabularList = [];
+    const seenDatasetNames = new Set();
 
-    if (detectedActiveDoc) {
-      activeTabular = await getRegisteredDataset(detectedActiveDoc);
-    }
-
-    if (!activeTabular && (!detectedActiveDoc || isTabularDoc)) {
-      const all = getAllRegisteredDatasets();
-      if (all.length > 0) {
-        const notTrain = all.find((d) => !/train\.csv/i.test(d.filename));
-        activeTabular = notTrain || all[all.length - 1];
-      } else {
-        activeTabular = await getRegisteredDataset();
+    for (const docName of detectedActiveDocs) {
+      try {
+        const ds = await getRegisteredDataset(docName);
+        if (ds && !seenDatasetNames.has(ds.filename || ds.documentId)) {
+          seenDatasetNames.add(ds.filename || ds.documentId);
+          activeTabularList.push(ds);
+        }
+      } catch (loadErr) {
+        console.warn(`[Session Memory] Could not load dataset for "${docName}":`, loadErr?.message);
       }
     }
 
-    if (activeTabular && activeTabular.filename) {
-      setActiveSessionDocument(activeTabular.filename);
-      detectedActiveDoc = activeTabular.filename;
+    // If no datasets loaded from detected names, check all registered datasets in memory
+    if (activeTabularList.length === 0) {
+      const all = getAllRegisteredDatasets();
+      for (const ds of all) {
+        if (!seenDatasetNames.has(ds.filename || ds.documentId)) {
+          seenDatasetNames.add(ds.filename || ds.documentId);
+          activeTabularList.push(ds);
+        }
+      }
     }
+
+    activeTabular = activeTabularList[0] || null;
 
     // 1. LIVE RAG RETRIEVAL & GEMINI STREAMING (If API Key Available)
     if (apiKey && apiKey.trim() !== '') {
@@ -1527,27 +1698,81 @@ router.post('/', async (req, res) => {
           ragContextText = `${FINANCIAL_ANALYST_SYSTEM_PROMPT}\n\nStrictly base your calculations, summaries, and GenUI tables ONLY on the real data provided by the backend tools. NEVER hallucinate, invent, or use dummy financial numbers. If the tool returns empty data, explicitly state that the data was not received.`;
         }
 
-        // Attach pre-computed tabular manifest & real parsed JSON records into context
-        if (activeTabular) {
-          try {
-            if (activeTabular.profile) {
-              const manifestChunks = generateTabularManifestChunks(activeTabular.profile, activeTabular.rows);
+        // Attach multi-file schemas, column distributions, and combined data frames into context
+        if (activeTabularList.length > 0) {
+          const fileNamesList = activeTabularList.map((d) => d.filename || d.documentId).join(', ');
+
+          if (activeTabularList.length > 1) {
+            ragContextText += `\n\n==================================================
+MULTI-FILE ACTIVE CONTEXT CATALOG (${activeTabularList.length} ACTIVE DATASETS LOADED):
+Active Files: ${fileNamesList}
+==================================================`;
+
+            for (let idx = 0; idx < activeTabularList.length; idx++) {
+              const ds = activeTabularList[idx];
+              const sampleRows = ds.rows ? ds.rows.slice(0, 10) : [];
+              ragContextText += `\n\n### ACTIVE DATASET [${idx + 1}/${activeTabularList.length}]: "${ds.filename}"
+Type: ${ds.isFromPdf ? 'Extracted PDF Invoice Tabular Records' : 'Tabular Dataset (CSV/Excel)'}
+Total Records: ${ds.rows?.length || 0} rows
+Column Schema (${ds.headers?.length || 0} columns): ${JSON.stringify(ds.headers || [])}
+First 10 Rows (Real Parsed JSON Records):
+${JSON.stringify(sampleRows, null, 2)}`;
+
+              if (ds.profile) {
+                const manifestChunks = generateTabularManifestChunks(ds.profile, ds.rows);
+                ragContextText += `\nSummary Financial Profile for "${ds.filename}":\n${manifestChunks[0] || ''}`;
+              }
+            }
+
+            // Detect common foreign keys and attach combined relational join preview
+            const ds1 = activeTabularList[0];
+            const ds2 = activeTabularList[1];
+            const commonKeys = findCommonJoinKeys(ds1.headers, ds2.headers);
+
+            if (commonKeys.length > 0) {
+              const bestKey = commonKeys[0];
+              const joinResult = joinTabularDatasets(ds1, ds2, {
+                joinType: 'inner',
+                key1: bestKey.key1,
+                key2: bestKey.key2,
+              });
+
+              const sampleJoined = joinResult.joinedRows.slice(0, 10);
+              ragContextText += `\n\n### COMBINED MULTI-FILE DATA FRAME (SQL-LIKE JOIN PREVIEW):
+Joined Datasets: "${ds1.filename}" [${bestKey.key1}] ⟕ "${ds2.filename}" [${bestKey.key2}]
+Join Match Statistics:
+- Matched Distinct Identifiers: ${joinResult.matchSummary.matchedDistinctKeysCount}
+- Total Joined Records: ${joinResult.matchSummary.totalJoinedRows}
+- Discrepancy / Variance Count: ${joinResult.matchSummary.discrepancyCount}
+Sample Combined Rows (First 10 Merged Records):
+${JSON.stringify(sampleJoined, null, 2)}`;
+            }
+
+            ragContextText += `\n\nMANDATORY MULTI-FILE DIRECTIVES:
+1. All ${activeTabularList.length} files are active simultaneously. When user queries cross-reference, compare, or reconcile data, execute SQL-like joins matching records on shared IDs (e.g. vendor_id, customer_id, invoice_id, account_no).
+2. Report matching counts, discrepancies, and variances clearly in Markdown comparison tables or GenUI schedules.
+3. NEVER hallucinate or ignore any of the active files. Cite the exact filename for every cited field.`;
+
+            console.log(`[RAG Chat] Attached multi-file context for ${activeTabularList.length} files: ${fileNamesList}`);
+          } else {
+            // Single-file context (Preserves 100% existing single-file behavior)
+            const ds = activeTabularList[0];
+            if (ds.profile) {
+              const manifestChunks = generateTabularManifestChunks(ds.profile, ds.rows);
               ragContextText += `\n\n### DETERMINISTIC TABULAR AUDIT DATASET MANIFEST (Pre-Computed):\n${manifestChunks.join('\n\n')}`;
             }
 
-            const sampleRows = activeTabular.rows ? activeTabular.rows.slice(0, 10) : [];
+            const sampleRows = ds.rows ? ds.rows.slice(0, 10) : [];
             ragContextText += `\n\n### ACTIVE VERIFIED TABULAR DATASET (REAL BACKEND DATA):
-Filename: ${activeTabular.filename}
-Total Parsed Records: ${activeTabular.rows?.length || 0}
-Available Column Headers: ${JSON.stringify(activeTabular.headers || [])}
+Filename: ${ds.filename}
+Total Parsed Records: ${ds.rows?.length || 0}
+Available Column Headers: ${JSON.stringify(ds.headers || [])}
 First 10 Rows (Real Parsed JSON Array):
 ${JSON.stringify(sampleRows, null, 2)}
 
 Strictly base your calculations, summaries, and GenUI tables ONLY on the real data provided by the backend tools. NEVER hallucinate, invent, or use dummy financial numbers. If the tool returns empty data, explicitly state that the data was not received.`;
 
-            console.log(`[RAG Chat] Attached verified tabular context for: ${activeTabular.filename} (${activeTabular.rows?.length} rows)`);
-          } catch (mErr) {
-            console.warn('[RAG Chat] Error attaching tabular manifest:', mErr);
+            console.log(`[RAG Chat] Attached verified tabular context for: ${ds.filename} (${ds.rows?.length} rows)`);
           }
         }
 
@@ -1580,6 +1805,7 @@ Strictly base your calculations, summaries, and GenUI tables ONLY on the real da
             query_tabular_dataset: queryTabularDatasetTool,
             get_dataset_records: getDatasetRecordsTool,
             cross_reference_documents: crossReferenceDocumentsTool,
+            join_datasets: joinDatasetsTool,
           },
         });
 
@@ -1593,7 +1819,7 @@ Strictly base your calculations, summaries, and GenUI tables ONLY on the real da
         }
 
         const fallbackGenerator = () =>
-          getSimulatedFinancialResponse(userPromptText || 'Financial Overview', activeTabular);
+          getSimulatedFinancialResponse(userPromptText || 'Financial Overview', activeTabularList);
 
         await pipeWebResponseToExpress(webResponse, res, fallbackGenerator);
         return;
@@ -1605,7 +1831,7 @@ Strictly base your calculations, summaries, and GenUI tables ONLY on the real da
     // 2. SIMULATED STREAMED RESPONSE (Fallback for demo/offline/rate-limited/error mode)
     const simulatedFullText = getSimulatedFinancialResponse(
       userPromptText || 'Financial Overview',
-      activeTabular
+      activeTabularList
     );
     const responseId = `sim-resp-${Date.now()}`;
     const words = simulatedFullText.split(/(?<=\s+)/);
@@ -1641,7 +1867,7 @@ Strictly base your calculations, summaries, and GenUI tables ONLY on the real da
       try {
         const simulatedFullText = getSimulatedFinancialResponse(
           userPromptText || 'Financial Overview',
-          activeTabular
+          activeTabularList
         );
         const responseId = `err-fb-${Date.now()}`;
         const stream = createUIMessageStream({
