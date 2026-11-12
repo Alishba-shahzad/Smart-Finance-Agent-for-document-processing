@@ -4,11 +4,11 @@
   "private": true,
   "description": "Smart Conversational Agent for Financial Document Processing (React+Vite Frontend & Node.js/Express Backend)",
   "scripts": {
-    "dev:backend": "cd backend && npm run dev",
-    "dev:frontend": "cd frontend && npm run dev",
-    "dev": "node -e \"const { spawn } = require('child_process'); spawn('npm', ['run', 'dev'], { cwd: 'backend', stdio: 'inherit', shell: true }); spawn('npm', ['run', 'dev'], { cwd: 'frontend', stdio: 'inherit', shell: true });\"",
-    "build:frontend": "cd frontend && npm run build",
-    "build": "npm run build:frontend",
-    "start": "cd backend && npm start"
+    "dev:backend": "node init && cd backend && npm run dev",
+    "dev:frontend": "node init && cd frontend && npm run dev",
+    "dev": "node init && node -e \"const { spawn } = require('child_process'); spawn('npm', ['run', 'dev'], { cwd: 'backend', stdio: 'inherit', shell: true }); spawn('npm', ['run', 'dev'], { cwd: 'frontend', stdio: 'inherit', shell: true });\"",
+    "build:frontend": "node init && cd frontend && npm run build",
+    "build": "node init && npm run build:frontend",
+    "start": "node init && cd backend && npm start"
   }
 }
